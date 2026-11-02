@@ -1,0 +1,6 @@
+{
+  "name": "FamilyStream Vault",
+  "description": "Rodzinny Skarbiec Streamingowy do bezpiecznego przechowywania i współdzielenia haseł VOD oraz szyfrowanych haseł osobistych.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

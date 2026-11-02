@@ -1,0 +1,119 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@layer base {
+  :root {
+    --vault-bg: #F2EFE9;
+    --vault-surface: #FAF7F2;
+    --vault-surface-hover: #F5F0E6;
+    --vault-border: #DED8CE;
+    --vault-text: #2C3038;
+    --vault-muted: #6B707B;
+    --vault-accent: #3B627E;
+    --vault-accent-hover: #2E4F66;
+    --vault-success: #3E7B67;
+    --vault-warning: #B47B38;
+    --vault-danger: #B04A4A;
+  }
+
+  .dark {
+    --vault-bg: #1E222A;
+    --vault-surface: #262B35;
+    --vault-surface-hover: #2D3340;
+    --vault-border: #343B48;
+    --vault-text: #E2E6EE;
+    --vault-muted: #9BA3B4;
+    --vault-accent: #5E81AC;
+    --vault-accent-hover: #7395BF;
+    --vault-success: #689D8A;
+    --vault-warning: #D09A5B;
+    --vault-danger: #BF616A;
+  }
+
+  body {
+    background-color: var(--vault-bg);
+    color: var(--vault-text);
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    transition: background-color 180ms ease, color 180ms ease;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    text-wrap: balance;
+  }
+
+  .font-mono, code, pre {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Official Google Sign-In Material Button Styling */
+.gsi-material-button {
+  -moz-user-select: none;
+  -webkit-user-select: none;
+  -ms-user-select: none;
+  -webkit-appearance: none;
+  background-color: #FAF7F2;
+  background-image: none;
+  border: 1px solid #DED8CE;
+  border-radius: 10px;
+  box-sizing: border-box;
+  color: #2C3038;
+  cursor: pointer;
+  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  height: 44px;
+  letter-spacing: 0.15px;
+  outline: none;
+  overflow: hidden;
+  padding: 0 16px;
+  position: relative;
+  text-align: center;
+  transition: background-color 0.18s, border-color 0.18s, box-shadow 0.18s;
+  vertical-align: middle;
+  white-space: nowrap;
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dark .gsi-material-button {
+  background-color: #262B35;
+  border-color: #343B48;
+  color: #E2E6EE;
+}
+
+.gsi-material-button:hover {
+  background-color: #F2EFE9;
+}
+
+.dark .gsi-material-button:hover {
+  background-color: #2D3340;
+}
+
+.gsi-material-button .gsi-material-button-icon {
+  height: 20px;
+  margin-right: 10px;
+  min-width: 20px;
+  width: 20px;
+}
+
+.gsi-material-button .gsi-material-button-content-wrapper {
+  align-items: center;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  height: 100%;
+  justify-content: center;
+  position: relative;
+  width: 100%;
+}
