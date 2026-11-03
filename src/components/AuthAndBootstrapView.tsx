@@ -46,6 +46,7 @@ import {
   PwaHandoffPayload,
   savePwaHandoffParameters,
   setConfiguredGoogleOAuthClientId,
+  syncSavedAdminFromVaultState,
 } from '../lib/googleOAuthAndDriveSync';
 
 interface AuthAndBootstrapViewProps {
@@ -243,9 +244,18 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         }
 
         const restored = await loadPwaHandoffParameters();
+        if (active) {
+          const synced = syncSavedAdminFromVaultState(vaultConfig);
+          if (synced) {
+            setSavedGoogleAdmin(synced);
+          }
+        }
         if (!active || !restored) return;
 
         setHandoffData(restored);
+        if (restored.savedAdminAccount) {
+          setSavedGoogleAdmin(getSavedAdminGoogleAccount());
+        }
         if (restored.googleOAuthClientId && !customOAuthClientId) {
           setCustomOAuthClientId(restored.googleOAuthClientId);
         }
@@ -296,6 +306,14 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       active = false;
     };
   }, []);
+
+  // Automatically detect and remember Admin Google Account from loaded vaultConfig database
+  useEffect(() => {
+    const synced = syncSavedAdminFromVaultState(vaultConfig);
+    if (synced) {
+      setSavedGoogleAdmin(synced);
+    }
+  }, [vaultConfig]);
 
   // Verify invite token whenever `inviteToken` changes (ONLY after handoff initialization and shared Drive sync finish!)
   useEffect(() => {
@@ -739,9 +757,18 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
           () => {}
         );
       }
+      const detectedEmail = !forceChooser
+        ? savedGoogleAdmin?.email ||
+          (vaultConfig?.adminEmail &&
+          !vaultConfig.adminEmail.endsWith('.local')
+            ? vaultConfig.adminEmail
+            : undefined)
+        : undefined;
       await onAdminGoogleLogin({
+        email: detectedEmail,
+        displayName: !forceChooser ? savedGoogleAdmin?.displayName : undefined,
         masterPassword: adminMasterPasswordInput.trim() || undefined,
-        skipOAuthPopup: false,
+        skipOAuthPopup: !forceChooser && Boolean(detectedEmail),
         forceAccountChooser: forceChooser,
       });
       setSavedGoogleAdmin(getSavedAdminGoogleAccount());
@@ -1748,21 +1775,28 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                   </div>
                   <span className="gsi-material-button-contents">
                     {isAdminLoading
-                      ? 'Logowanie i synchronizacja z Google Drive...'
-                      : savedGoogleAdmin
-                        ? `Zaloguj jako Administrator (${savedGoogleAdmin.email})`
+                      ? 'Odblokowywanie skarbca Administratora...'
+                      : savedGoogleAdmin ||
+                          (vaultConfig?.adminEmail &&
+                            !vaultConfig.adminEmail.endsWith('.local'))
+                        ? `Zaloguj jako Administrator (${
+                            savedGoogleAdmin?.email || vaultConfig?.adminEmail
+                          })`
                         : 'Zaloguj jako Główny Administrator przez Google'}
                   </span>
                 </div>
               </button>
 
-              {savedGoogleAdmin && (
+              {(savedGoogleAdmin ||
+                (vaultConfig?.adminEmail &&
+                  !vaultConfig.adminEmail.endsWith('.local'))) && (
                 <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
                   <span>
-                    Zapamiętane konto Google:{' '}
+                    Wykryte konto Admina w bazie:{' '}
                     <strong className="text-[var(--vault-text)]">
-                      {savedGoogleAdmin.email}
-                    </strong>
+                      {savedGoogleAdmin?.email || vaultConfig?.adminEmail}
+                    </strong>{' '}
+                    (logowanie 1 kliknięciem bez okna Google)
                   </span>
                   <button
                     type="button"
@@ -1770,7 +1804,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                     disabled={isAdminLoading || isFamilyLoading}
                     className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer shrink-0"
                   >
-                    Użyj innego konta Google
+                    Zmień konto Google
                   </button>
                 </div>
               )}

@@ -68,6 +68,7 @@ import {
   pushVaultStateToDriveAutoSync,
   setConfiguredGoogleOAuthClientId,
   signInWithGoogleAdminDirect,
+  syncSavedAdminFromVaultState,
   uploadEncryptedVaultToDrive,
 } from './lib/googleOAuthAndDriveSync';
 import {
@@ -101,6 +102,15 @@ import { AuthAndBootstrapView } from './components/AuthAndBootstrapView';
 import { AdminTab2AccountsAndDevices } from './components/AdminTab2AccountsAndDevices';
 import { AdminTab3ConfigAndBackup } from './components/AdminTab3ConfigAndBackup';
 import { UserProfileView } from './components/UserProfileView';
+
+const REMEMBERED_SESSION_KEY = 'fsv_remembered_session_v1';
+
+interface RememberedVaultSession {
+  memberId: string;
+  dekBase64: string;
+  mergedDeks: string[];
+  savedAt: string;
+}
 
 function makeId(prefix: string): string {
   const bytes = new Uint8Array(8);
@@ -205,8 +215,9 @@ export default function App() {
 
   // Apply server state snapshot to React state
   const applyServerState = useCallback((state: ServerVaultState) => {
+    const safeMembers = Array.isArray(state.members) ? state.members : [];
     setVaultConfig(state.vaultConfig || null);
-    setMembers(Array.isArray(state.members) ? state.members : []);
+    setMembers(safeMembers);
     setDevices(Array.isArray(state.devices) ? state.devices : []);
     setPasswords(Array.isArray(state.passwords) ? state.passwords : []);
     setInvitations(Array.isArray(state.invitations) ? state.invitations : []);
@@ -224,6 +235,31 @@ export default function App() {
           state.bootstrapStatus.googleOAuthClientId
         );
       }
+    }
+    // Automatically detect and remember Admin account from the vault database
+    syncSavedAdminFromVaultState(state.vaultConfig, safeMembers);
+
+    // Restore remembered active session when reopening the PWA if valid
+    try {
+      const rawSession = localStorage.getItem(REMEMBERED_SESSION_KEY);
+      if (rawSession) {
+        const parsedSession = JSON.parse(rawSession) as RememberedVaultSession;
+        if (
+          parsedSession?.memberId &&
+          parsedSession?.dekBase64 &&
+          safeMembers.some(
+            (m) => m.id === parsedSession.memberId && m.status === 'active'
+          )
+        ) {
+          setCurrentMemberId((prev) => prev || parsedSession.memberId);
+          setActiveDekBase64((prev) => prev || parsedSession.dekBase64);
+          setActiveMergedDeks((prev) =>
+            prev.length > 0 ? prev : parsedSession.mergedDeks || []
+          );
+        }
+      }
+    } catch {
+      // ignore storage errors
     }
   }, []);
 
@@ -640,6 +676,28 @@ export default function App() {
     };
   }, [passwords, currentMember, activeDekBase64, activeMergedDeks]);
 
+  // Persist active unlocked session so reopening the PWA keeps the session remembered
+  useEffect(() => {
+    if (currentMemberId && activeDekBase64 && !isVaultLockedByTimeout) {
+      try {
+        const payload: RememberedVaultSession = {
+          memberId: currentMemberId,
+          dekBase64: activeDekBase64,
+          mergedDeks: activeMergedDeks,
+          savedAt: new Date().toISOString(),
+        };
+        localStorage.setItem(REMEMBERED_SESSION_KEY, JSON.stringify(payload));
+      } catch {
+        // ignore
+      }
+    }
+  }, [
+    currentMemberId,
+    activeDekBase64,
+    activeMergedDeks,
+    isVaultLockedByTimeout,
+  ]);
+
   // Auto-Lock inactivity timer
   useEffect(() => {
     if (!currentMember || isVaultLockedByTimeout) return;
@@ -649,6 +707,11 @@ export default function App() {
     const resetTimer = () => {
       window.clearTimeout(timerId);
       timerId = window.setTimeout(() => {
+        try {
+          localStorage.removeItem(REMEMBERED_SESSION_KEY);
+        } catch {
+          // ignore
+        }
         setActiveDekBase64(null);
         setIsVaultLockedByTimeout(true);
       }, timeoutMinutes * 60 * 1000);
@@ -700,7 +763,7 @@ export default function App() {
     return updatedState;
   };
 
-  // 1. FIRST-ADMIN CLAIM & ADMIN GOOGLE LOGIN (Always checks Google Drive for existing Vault first!)
+  // 1. FIRST-ADMIN CLAIM & ADMIN GOOGLE LOGIN (Automatically detects Admin from vault database for 1-click login without Google window!)
   const handleAdminGoogleLogin = async (options?: {
     email?: string;
     displayName?: string;
@@ -708,9 +771,19 @@ export default function App() {
     skipOAuthPopup?: boolean;
     forceAccountChooser?: boolean;
   }) => {
+    const existingAdminInDb = members.find(
+      (m) => m.role === 'admin' || m.username.toLowerCase() === 'admin'
+    );
+    const detectedDbEmail =
+      options?.email ||
+      (vaultConfig?.adminEmail && !vaultConfig.adminEmail.endsWith('.local')
+        ? vaultConfig.adminEmail
+        : undefined);
     const identity = await signInWithGoogleAdminDirect({
-      email: options?.email,
-      displayName: options?.displayName,
+      email: !options?.forceAccountChooser ? detectedDbEmail : undefined,
+      displayName: !options?.forceAccountChooser
+        ? options?.displayName || existingAdminInDb?.fullName
+        : undefined,
       skipOAuthPopup: options?.skipOAuthPopup,
       forceAccountChooser: options?.forceAccountChooser,
     });
@@ -1048,8 +1121,10 @@ export default function App() {
   const handleResetLocalVaultInstance = useCallback(async () => {
     try {
       window.localStorage.removeItem('fsv_standalone_state_v1');
+      window.localStorage.removeItem('fsv_standalone_vault_state_v1');
       window.localStorage.removeItem('fsv_standalone_session_v1');
       window.localStorage.removeItem('fsv_pwa_handoff_v1');
+      window.localStorage.removeItem(REMEMBERED_SESSION_KEY);
       const emptyState = await replaceVaultStateOnServer({
         vaultConfig: null,
         members: [],
@@ -2783,6 +2858,11 @@ export default function App() {
     : null;
 
   const handleLogout = () => {
+    try {
+      localStorage.removeItem(REMEMBERED_SESSION_KEY);
+    } catch {
+      // ignore
+    }
     setVaultApiSessionContext({ sessionToken: null });
     setCurrentMemberId(null);
     setActiveDekBase64(null);
@@ -2938,6 +3018,11 @@ export default function App() {
                 onRegisterBiometrics={handleRegisterBiometricsForCurrentDevice}
                 onChangeOwnPassword={handleChangeOwnPassword}
                 onLockVault={() => {
+                  try {
+                    localStorage.removeItem(REMEMBERED_SESSION_KEY);
+                  } catch {
+                    // ignore
+                  }
                   setActiveDekBase64(null);
                   setIsVaultLockedByTimeout(true);
                 }}

@@ -55,6 +55,7 @@ export interface PwaHandoffParameters {
   inviteMetadataPacket?: string;
   encryptedSnapshot?: string;
   rawInviteUrl?: string;
+  savedAdminAccount?: SavedAdminGoogleAccount;
   savedAt: string;
 }
 
@@ -130,33 +131,158 @@ export function decodeInviteMetadataPacket(
   return null;
 }
 
-export function getSavedAdminGoogleAccount(): SavedAdminGoogleAccount | null {
+function detectAdminAccountFromLocalVaultState(): SavedAdminGoogleAccount | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = localStorage.getItem(LOCAL_SAVED_GOOGLE_ADMIN_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as SavedAdminGoogleAccount;
-    if (!parsed || !parsed.email || !parsed.uid) return null;
-    const isTokenFresh =
-      Boolean(parsed.accessToken) &&
-      Boolean(parsed.tokenSavedAt) &&
-      Date.now() - (parsed.tokenSavedAt || 0) < 50 * 60 * 1000;
-    if (isTokenFresh && parsed.accessToken && !cachedAccessToken) {
-      cachedAccessToken = parsed.accessToken;
-    }
-    return {
-      ...parsed,
-      accessToken: isTokenFresh ? parsed.accessToken : undefined,
+    const rawState = localStorage.getItem('fsv_standalone_vault_state_v1');
+    if (!rawState) return null;
+    const parsedState = JSON.parse(rawState) as {
+      vaultConfig?: {
+        initialized?: boolean;
+        adminUid?: string;
+        adminEmail?: string;
+      } | null;
+      members?: Array<{
+        id?: string;
+        fullName?: string;
+        username?: string;
+        role?: string;
+        status?: string;
+        googleUid?: string;
+      }>;
     };
+    const adminMember = (parsedState?.members || []).find(
+      (m) => m.role === 'admin' || m.username?.toLowerCase() === 'admin'
+    );
+    const rawEmail = (parsedState?.vaultConfig?.adminEmail || '').trim();
+    const hasRealEmail =
+      Boolean(rawEmail) &&
+      rawEmail.includes('@') &&
+      !rawEmail.endsWith('.local');
+
+    if (!hasRealEmail && !adminMember) {
+      return null;
+    }
+
+    const emailToUse = hasRealEmail
+      ? rawEmail
+      : rawEmail || 'admin@familystream.local';
+    const uidToUse =
+      parsedState?.vaultConfig?.adminUid ||
+      adminMember?.googleUid ||
+      `google_${emailToUse}`;
+    const displayNameToUse =
+      adminMember?.fullName ||
+      emailToUse.split('@')[0] ||
+      'Główny Administrator';
+
+    const detected: SavedAdminGoogleAccount = {
+      uid: uidToUse,
+      email: emailToUse,
+      displayName: displayNameToUse,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(
+      LOCAL_SAVED_GOOGLE_ADMIN_KEY,
+      JSON.stringify(detected)
+    );
+    return detected;
   } catch {
     return null;
   }
 }
 
+export function getSavedAdminGoogleAccount(): SavedAdminGoogleAccount | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOCAL_SAVED_GOOGLE_ADMIN_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as SavedAdminGoogleAccount;
+      if (parsed && parsed.email && parsed.uid) {
+        const isTokenFresh =
+          Boolean(parsed.accessToken) &&
+          Boolean(parsed.tokenSavedAt) &&
+          Date.now() - (parsed.tokenSavedAt || 0) < 50 * 60 * 1000;
+        if (isTokenFresh && parsed.accessToken && !cachedAccessToken) {
+          cachedAccessToken = parsed.accessToken;
+        }
+        return {
+          ...parsed,
+          accessToken: isTokenFresh ? parsed.accessToken : undefined,
+        };
+      }
+    }
+    return detectAdminAccountFromLocalVaultState();
+  } catch {
+    return null;
+  }
+}
+
+export function syncSavedAdminFromVaultState(
+  vaultConfig?: {
+    initialized?: boolean;
+    adminUid?: string;
+    adminEmail?: string;
+  } | null,
+  members?: Array<{
+    fullName?: string;
+    username?: string;
+    role?: string;
+    googleUid?: string;
+  }>
+): SavedAdminGoogleAccount | null {
+  if (typeof window === 'undefined') return null;
+  const existing = getSavedAdminGoogleAccount();
+  const adminMember = (members || []).find(
+    (m) => m.role === 'admin' || m.username?.toLowerCase() === 'admin'
+  );
+  const configEmail = (vaultConfig?.adminEmail || '').trim();
+  const hasRealConfigEmail =
+    Boolean(configEmail) &&
+    configEmail.includes('@') &&
+    !configEmail.endsWith('.local');
+
+  if (existing && (!hasRealConfigEmail || existing.email === configEmail)) {
+    return existing;
+  }
+
+  if (!hasRealConfigEmail && !adminMember) {
+    return existing;
+  }
+
+  const email = hasRealConfigEmail
+    ? configEmail
+    : existing?.email || configEmail || 'admin@familystream.local';
+  const uid =
+    vaultConfig?.adminUid ||
+    adminMember?.googleUid ||
+    existing?.uid ||
+    `google_${email}`;
+  const displayName =
+    adminMember?.fullName ||
+    existing?.displayName ||
+    email.split('@')[0] ||
+    'Główny Administrator';
+
+  saveAdminGoogleAccount({
+    uid,
+    email,
+    displayName,
+    accessToken: existing?.accessToken || cachedAccessToken || '',
+  });
+  return getSavedAdminGoogleAccount();
+}
+
 export function saveAdminGoogleAccount(identity: AdminGoogleIdentity): void {
   if (typeof window === 'undefined') return;
   try {
-    const existing = getSavedAdminGoogleAccount();
+    let existing: SavedAdminGoogleAccount | null = null;
+    try {
+      const raw = localStorage.getItem(LOCAL_SAVED_GOOGLE_ADMIN_KEY);
+      if (raw) existing = JSON.parse(raw) as SavedAdminGoogleAccount;
+    } catch {
+      existing = null;
+    }
     const tokenToSave = identity.accessToken || existing?.accessToken;
     const payload: SavedAdminGoogleAccount = {
       uid: identity.uid,
@@ -169,6 +295,9 @@ export function saveAdminGoogleAccount(identity: AdminGoogleIdentity): void {
       savedAt: new Date().toISOString(),
     };
     localStorage.setItem(LOCAL_SAVED_GOOGLE_ADMIN_KEY, JSON.stringify(payload));
+    void savePwaHandoffParameters({ savedAdminAccount: payload }).catch(
+      () => {}
+    );
   } catch {
     // ignore storage errors
   }
@@ -380,6 +509,19 @@ export async function loadPwaHandoffParameters(): Promise<PwaHandoffParameters |
       if (parsed.googleOAuthClientId) {
         setConfiguredGoogleOAuthClientId(parsed.googleOAuthClientId);
       }
+      if (
+        parsed.savedAdminAccount &&
+        !localStorage.getItem(LOCAL_SAVED_GOOGLE_ADMIN_KEY)
+      ) {
+        try {
+          localStorage.setItem(
+            LOCAL_SAVED_GOOGLE_ADMIN_KEY,
+            JSON.stringify(parsed.savedAdminAccount)
+          );
+        } catch {
+          // ignore
+        }
+      }
       return parsed;
     }
   } catch {
@@ -394,6 +536,16 @@ export async function loadPwaHandoffParameters(): Promise<PwaHandoffParameters |
         const parsed = (await res.json()) as PwaHandoffParameters;
         if (parsed.googleOAuthClientId) {
           setConfiguredGoogleOAuthClientId(parsed.googleOAuthClientId);
+        }
+        if (parsed.savedAdminAccount) {
+          try {
+            localStorage.setItem(
+              LOCAL_SAVED_GOOGLE_ADMIN_KEY,
+              JSON.stringify(parsed.savedAdminAccount)
+            );
+          } catch {
+            // ignore
+          }
         }
         try {
           localStorage.setItem(LOCAL_PWA_HANDOFF_KEY, JSON.stringify(parsed));
@@ -446,7 +598,7 @@ function loadGoogleIdentityServicesScript(): Promise<void> {
 }
 
 async function requestDirectGoogleOAuthToken(
-  promptMode: '' | 'select_account' | 'consent' = '',
+  promptMode: '' | 'none' | 'select_account' | 'consent' = '',
   loginHintEmail?: string
 ): Promise<string> {
   await loadPublicRuntimeOAuthConfig();
@@ -473,8 +625,16 @@ async function requestDirectGoogleOAuthToken(
     ''
   ).trim();
 
+  // When a saved account hint is known and the user did NOT ask for the account chooser,
+  // use 'none' with hint/login_hint so Android with multiple Google accounts selects the hinted account without showing the account chooser sheet.
+  const effectivePrompt =
+    promptMode === '' && hintToUse && !hintToUse.endsWith('.local')
+      ? 'none'
+      : promptMode;
+
   return new Promise<string>((resolve, reject) => {
     let settled = false;
+    let retriedWithEmptyPrompt = false;
     const timeoutId = window.setTimeout(() => {
       if (!settled) {
         settled = true;
@@ -489,10 +649,24 @@ async function requestDirectGoogleOAuthToken(
     const tokenClient = window.google!.accounts!.oauth2!.initTokenClient({
       client_id: clientId,
       scope: DRIVE_SCOPES.join(' '),
-      prompt: promptMode,
+      prompt: effectivePrompt,
       ...(hintToUse ? { hint: hintToUse, login_hint: hintToUse } : {}),
       callback: (response) => {
         if (settled) return;
+        if (
+          (response.error === 'interaction_required' ||
+            response.error === 'consent_required' ||
+            response.error === 'login_required') &&
+          effectivePrompt === 'none' &&
+          !retriedWithEmptyPrompt
+        ) {
+          retriedWithEmptyPrompt = true;
+          tokenClient.requestAccessToken({
+            prompt: '',
+            ...(hintToUse ? { hint: hintToUse, login_hint: hintToUse } : {}),
+          });
+          return;
+        }
         settled = true;
         window.clearTimeout(timeoutId);
         if (response.error || !response.access_token) {
@@ -532,7 +706,7 @@ async function requestDirectGoogleOAuthToken(
     });
 
     tokenClient.requestAccessToken({
-      prompt: promptMode,
+      prompt: effectivePrompt,
       ...(hintToUse ? { hint: hintToUse, login_hint: hintToUse } : {}),
     });
   });
@@ -567,7 +741,7 @@ async function fetchGoogleUserInfo(
 /**
  * Direct Google OAuth 2.0 Admin Login.
  * - On the VERY FIRST login (or when `forceAccountChooser: true` is passed), opens the Google Account Chooser (`prompt: 'select_account'`) and saves the chosen account (`fsv_saved_google_admin_v1`).
- * - On EVERY SUBSEQUENT login on the same device, uses the remembered Google account immediately without forcing the account chooser again!
+ * - On EVERY SUBSEQUENT login on the same device (or when the Admin account is already present in the vault database), uses the detected/remembered Google account immediately in 1 click without opening the Google Account Chooser window!
  */
 export async function signInWithGoogleAdminDirect(options?: {
   email?: string;
@@ -577,7 +751,7 @@ export async function signInWithGoogleAdminDirect(options?: {
 }): Promise<AdminGoogleIdentity> {
   const savedAccount = getSavedAdminGoogleAccount();
 
-  // If the Admin already chose their Google account once on this PWA device and didn't click "Zmień konto Google", log in immediately without asking which account to use!
+  // 1. If the Admin account is already saved or detected from the vault database and the user didn't click "Zmień konto Google", log in immediately without opening the Google window!
   if (savedAccount && !options?.forceAccountChooser) {
     const activeToken =
       savedAccount.accessToken || cachedAccessToken || '';
@@ -592,13 +766,34 @@ export async function signInWithGoogleAdminDirect(options?: {
     };
   }
 
-  // First time on this device (or explicit account switch): open Google Account Chooser
+  // 2. If explicit email from vaultConfig was passed and forceAccountChooser is false, save & return immediately without opening the Google window!
+  if (
+    !options?.forceAccountChooser &&
+    options?.email &&
+    options.email.includes('@') &&
+    !options.email.endsWith('.local')
+  ) {
+    const cleanEmail = options.email.trim();
+    const identity: AdminGoogleIdentity = {
+      uid: `google_${cleanEmail}`,
+      email: cleanEmail,
+      displayName:
+        options.displayName?.trim() ||
+        cleanEmail.split('@')[0] ||
+        'Główny Administrator',
+      accessToken: cachedAccessToken || '',
+    };
+    saveAdminGoogleAccount(identity);
+    return identity;
+  }
+
+  // 3. First time on an uninitialized device (or explicit "Zmień konto Google"): open Google Account Chooser
   const promptMode = options?.forceAccountChooser || !savedAccount
     ? 'select_account'
-    : '';
+    : 'none';
   const token = await requestDirectGoogleOAuthToken(
     promptMode,
-    savedAccount?.email
+    savedAccount?.email || options?.email
   );
   const profile = await fetchGoogleUserInfo(token);
   const identity: AdminGoogleIdentity = {
@@ -619,10 +814,30 @@ export async function connectGoogleDriveOAuthDirect(
 ): Promise<string> {
   const saved = getSavedAdminGoogleAccount();
   const token = await requestDirectGoogleOAuthToken(
-    forceSelectAccount || !saved ? 'select_account' : '',
+    forceSelectAccount || !saved ? 'select_account' : 'none',
     saved?.email
   );
   cachedAccessToken = token;
+  if (saved) {
+    saveAdminGoogleAccount({
+      uid: saved.uid,
+      email: saved.email,
+      displayName: saved.displayName,
+      accessToken: token,
+    });
+  } else {
+    try {
+      const profile = await fetchGoogleUserInfo(token);
+      saveAdminGoogleAccount({
+        uid: profile.sub,
+        email: profile.email,
+        displayName: profile.name,
+        accessToken: token,
+      });
+    } catch {
+      // ignore
+    }
+  }
   return token;
 }
 
