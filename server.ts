@@ -462,7 +462,10 @@ function collectProjectSourceFiles(rootDir: string): Array<{
   return results;
 }
 
-function collectBuiltDistFiles(distDir: string): Array<{
+function collectBuiltDistFiles(
+  distDir: string,
+  publicOAuthClientId?: string
+): Array<{
   relativePath: string;
   buffer: Buffer;
 }> {
@@ -505,6 +508,26 @@ function collectBuiltDistFiles(distDir: string): Array<{
     results.push({
       relativePath: '.nojekyll',
       buffer: Buffer.from('', 'utf-8'),
+    });
+  }
+
+  const publicConfigJson = JSON.stringify(
+    {
+      googleOAuthClientId: (publicOAuthClientId || '').trim(),
+      publishedAt: new Date().toISOString(),
+    },
+    null,
+    2
+  );
+  const existingConfigIdx = results.findIndex(
+    (f) => f.relativePath === 'vault-public-config.json'
+  );
+  if (existingConfigIdx >= 0) {
+    results[existingConfigIdx].buffer = Buffer.from(publicConfigJson, 'utf-8');
+  } else {
+    results.push({
+      relativePath: 'vault-public-config.json',
+      buffer: Buffer.from(publicConfigJson, 'utf-8'),
     });
   }
 
@@ -1609,11 +1632,20 @@ async function startServer() {
       // 5. Build production PWA bundle (`dist/`) and publish directly to `gh-pages` branch using the same `repo` token
       let ghPagesPublished = false;
       try {
+        const publicClientId = (
+          process.env.VITE_GOOGLE_OAUTH_CLIENT_ID ||
+          process.env.GOOGLE_OAUTH_CLIENT_ID ||
+          bootstrapMeta.googleOAuthClientId ||
+          ''
+        ).trim();
         await buildViteBundle({
           root: __dirname,
           logLevel: 'silent',
         });
-        const distFiles = collectBuiltDistFiles(path.join(__dirname, 'dist'));
+        const distFiles = collectBuiltDistFiles(
+          path.join(__dirname, 'dist'),
+          publicClientId
+        );
         if (distFiles.length > 0) {
           await pushBranchWithDelta({
             targetBranch: 'gh-pages',
@@ -1752,6 +1784,38 @@ async function startServer() {
         status: 0,
         url: rawUrl,
         checkedAt: new Date().toISOString(),
+      });
+    }
+  });
+
+  // 13E. DOWNLOAD SHARED ENCRYPTED VAULT FILE FROM ADMIN GOOGLE DRIVE BY FILE ID
+  app.get('/api/vault/drive-shared-file', async (req, res) => {
+    const fileId =
+      typeof req.query.fileId === 'string' ? req.query.fileId.trim() : '';
+    if (!fileId) {
+      res.status(400).json({ error: 'Brak identyfikatora pliku Google Drive.' });
+      return;
+    }
+    try {
+      const downloadUrl = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(
+        fileId
+      )}`;
+      const driveRes = await fetch(downloadUrl, {
+        headers: {
+          'User-Agent': 'FamilyStream-Vault-Shared-Reader',
+        },
+      });
+      if (!driveRes.ok) {
+        res.status(driveRes.status).json({
+          error: `Nie udało się pobrać wspólnego pliku z Google Drive (${driveRes.status}).`,
+        });
+        return;
+      }
+      const text = await driveRes.text();
+      res.type('text/plain').send(text);
+    } catch {
+      res.status(500).json({
+        error: 'Błąd połączenia ze wspólnym plikiem na Google Drive.',
       });
     }
   });

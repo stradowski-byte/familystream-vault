@@ -15,6 +15,10 @@ import {
   Link2,
   AlertTriangle,
   Sparkles,
+  Copy,
+  Check,
+  Cloud,
+  RotateCcw,
 } from 'lucide-react';
 import {
   Device,
@@ -31,7 +35,15 @@ import {
   saveGoogleOAuthClientIdOnServer,
   verifyInvitationTokenOnServer,
 } from '../lib/vaultApiClient';
-import { setConfiguredGoogleOAuthClientId } from '../lib/googleOAuthAndDriveSync';
+import {
+  getOAuthClientId,
+  loadPublicRuntimeOAuthConfig,
+  loadPwaHandoffParameters,
+  parseCustomInviteUrlParameters,
+  PwaHandoffPayload,
+  savePwaHandoffParameters,
+  setConfiguredGoogleOAuthClientId,
+} from '../lib/googleOAuthAndDriveSync';
 
 interface AuthAndBootstrapViewProps {
   vaultConfig: VaultConfig | null;
@@ -74,11 +86,20 @@ interface AuthAndBootstrapViewProps {
   onRequestDeviceAuthorization: (customLabel: string) => Promise<void>;
   onUnlockWithBiometrics: () => Promise<void>;
   onCancelPendingState: () => void;
+  onSyncSharedVaultFromAdminDrive?: (params: {
+    driveFileId?: string;
+    syncEncryptionKey: string;
+    encryptedSnapshot?: string;
+    inviteToken?: string;
+  }) => Promise<boolean>;
+  onResetLocalVaultInstance?: () => Promise<void>;
   }
 
 function extractInviteTokenFromInput(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
+  const parsed = parseCustomInviteUrlParameters(trimmed);
+  if (parsed.inviteToken) return parsed.inviteToken;
   try {
     if (trimmed.includes('invite=')) {
       const url = new URL(
@@ -114,6 +135,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   onRequestDeviceAuthorization,
   onUnlockWithBiometrics,
   onCancelPendingState,
+  onSyncSharedVaultFromAdminDrive,
+  onResetLocalVaultInstance,
   }) => {
   const isVaultInitialized = Boolean(
     bootstrapStatus?.initialized ||
@@ -121,12 +144,20 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       membersCount > 0
   );
 
-  // Invitation token from URL (?invite=...) or manual paste
+  // Invitation token from URL (?invite=...) or restored from PWA Handoff CacheStorage
   const [inviteToken, setInviteToken] = useState<string>(() => {
     if (typeof window === 'undefined') return '';
-    const params = new URLSearchParams(window.location.search);
-    return (params.get('invite') || '').trim();
+    const parsed = parseCustomInviteUrlParameters(window.location.href);
+    return parsed.inviteToken || '';
   });
+  const [handoffData, setHandoffData] = useState<PwaHandoffPayload | null>(
+    null
+  );
+  const [isSyncingSharedDrive, setIsSyncingSharedDrive] = useState(false);
+  const [sharedDriveSyncedMsg, setSharedDriveSyncedMsg] = useState<
+    string | null
+  >(null);
+
   const [manualInviteInput, setManualInviteInput] = useState('');
   const [showManualInviteBox, setShowManualInviteBox] = useState(false);
 
@@ -157,22 +188,98 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [isFamilyLoading, setIsFamilyLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // First-Admin Startup Wizard State (Zero-Secret Google & Local Init)
-  const [adminEmailInput, setAdminEmailInput] = useState('');
-  const [adminNameInput, setAdminNameInput] = useState('Główny Administrator');
+  // First-Admin Startup Wizard State (Real Google Account Chooser + Google Drive)
   const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
   const [showOptionalOAuthConfig, setShowOptionalOAuthConfig] = useState(false);
   const [customOAuthClientId, setCustomOAuthClientId] = useState(
-    bootstrapStatus?.googleOAuthClientId || ''
+    () => bootstrapStatus?.googleOAuthClientId || getOAuthClientId() || ''
   );
   const [oauthSavedMsg, setOauthSavedMsg] = useState<string | null>(null);
+  const [copiedOrigin, setCopiedOrigin] = useState(false);
+  const [copiedCustomLink, setCopiedCustomLink] = useState(false);
 
-  // Verify invite token whenever `inviteToken` changes
+  const currentOrigin =
+    typeof window !== 'undefined' ? window.location.origin : '';
+
+  // Strict PWA-only enforcement outside AI Studio
+  const isRunningInInstalledPwa =
+    isPWAInstalled || detectedDevice.clientMode === 'pwa';
+  const isBrowserBlocked = !isAiStudioPreview && !isRunningInInstalledPwa;
+
+  // On mount: load public OAuth config (`vault-public-config.json`), save URL parameters into CacheStorage for PWA handoff, and restore handoff parameters inside installed PWA
+  useEffect(() => {
+    let active = true;
+    async function initHandoffAndSharedDrive() {
+      const publicClientId = await loadPublicRuntimeOAuthConfig();
+      if (active && publicClientId && !customOAuthClientId) {
+        setCustomOAuthClientId(publicClientId);
+      }
+
+      if (typeof window !== 'undefined') {
+        const urlParsed = parseCustomInviteUrlParameters(window.location.href);
+        if (
+          urlParsed.inviteToken ||
+          urlParsed.driveFileId ||
+          urlParsed.syncEncryptionKey ||
+          urlParsed.googleOAuthClientId
+        ) {
+          await savePwaHandoffParameters(urlParsed);
+        }
+      }
+
+      const restored = await loadPwaHandoffParameters();
+      if (!active || !restored) return;
+
+      setHandoffData(restored);
+      if (restored.googleOAuthClientId && !customOAuthClientId) {
+        setCustomOAuthClientId(restored.googleOAuthClientId);
+      }
+
+      // If we have shared Google Drive parameters from a customized family link, pull and decrypt the shared `.vault.enc` file from the Admin's Google Drive first
+      if (
+        onSyncSharedVaultFromAdminDrive &&
+        restored.syncEncryptionKey &&
+        (restored.driveFileId || restored.encryptedSnapshot)
+      ) {
+        setIsSyncingSharedDrive(true);
+        try {
+          const ok = await onSyncSharedVaultFromAdminDrive({
+            driveFileId: restored.driveFileId,
+            syncEncryptionKey: restored.syncEncryptionKey,
+            encryptedSnapshot: restored.encryptedSnapshot,
+            inviteToken: restored.inviteToken,
+          });
+          if (active && ok) {
+            setSharedDriveSyncedMsg(
+              'Pobrano i odszyfrowano wspólną bazę skarbca z Google Drive Administratora.'
+            );
+          }
+        } catch (err) {
+          console.warn('Synchronizacja wspólnego pliku z Google Drive:', err);
+        } finally {
+          if (active) setIsSyncingSharedDrive(false);
+        }
+      }
+
+      if (active && restored.inviteToken && !inviteToken) {
+        setInviteToken(restored.inviteToken);
+      }
+    }
+
+    initHandoffAndSharedDrive();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Verify invite token whenever `inviteToken` changes (and after any shared Drive sync finishes)
   useEffect(() => {
     let cancelled = false;
-    if (!inviteToken) {
-      setVerifiedInvite(null);
-      setInviteError(null);
+    if (!inviteToken || isSyncingSharedDrive) {
+      if (!inviteToken) {
+        setVerifiedInvite(null);
+        setInviteError(null);
+      }
       return;
     }
 
@@ -207,15 +314,23 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [inviteToken]);
+  }, [inviteToken, isSyncingSharedDrive]);
 
   const clearInviteFromUrlAndState = () => {
     setInviteToken('');
     setVerifiedInvite(null);
     setInviteError(null);
-    if (typeof window !== 'undefined' && window.location.search.includes('invite=')) {
+    if (
+      typeof window !== 'undefined' &&
+      (window.location.search.includes('invite=') ||
+        window.location.search.includes('gdf='))
+    ) {
       const url = new URL(window.location.href);
       url.searchParams.delete('invite');
+      url.searchParams.delete('gdf');
+      url.searchParams.delete('vkey');
+      url.searchParams.delete('cid');
+      url.searchParams.delete('snap');
       window.history.replaceState({}, '', url.pathname + url.search);
     }
   };
@@ -237,6 +352,149 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       }
     }
   };
+
+  const handleCopyOrigin = () => {
+    if (!currentOrigin) return;
+    navigator.clipboard.writeText(currentOrigin).catch(() => {});
+    setCopiedOrigin(true);
+    setTimeout(() => setCopiedOrigin(false), 2500);
+  };
+
+  const handleCopyCurrentCustomUrl = () => {
+    if (typeof window === 'undefined') return;
+    navigator.clipboard.writeText(window.location.href).catch(() => {});
+    setCopiedCustomLink(true);
+    setTimeout(() => setCopiedCustomLink(false), 2500);
+  };
+
+  // 0. STRICT BROWSER BLOCK GATE (Force PWA Installation on GitHub Pages / Web Browser)
+  if (isBrowserBlocked) {
+    const hasCustomInviteInUrlOrHandoff = Boolean(
+      inviteToken ||
+        handoffData?.inviteToken ||
+        handoffData?.driveFileId ||
+        (typeof window !== 'undefined' &&
+          (window.location.search.includes('invite=') ||
+            window.location.search.includes('gdf=')))
+    );
+
+    return (
+      <div className="max-w-lg mx-auto my-6 p-6 sm:p-8 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-6 shadow-md">
+        <div className="space-y-2">
+          <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
+            <Smartphone className="w-4 h-4 shrink-0" />
+            <span>
+              Wymagana Instalacja Aplikacji PWA · Blokada Trybu Przeglądarki
+            </span>
+          </div>
+          <h1 className="text-xl sm:text-2xl font-bold font-display text-[var(--vault-text)] leading-snug">
+            Zainstaluj FamilyStream Vault jako aplikację PWA, aby kontynuować
+          </h1>
+          <p className="text-xs sm:text-sm text-[var(--vault-muted)] leading-relaxed">
+            Ze względów bezpieczeństwa oraz trwałego powiązania z bazą danych na Google Drive korzystanie ze skarbca w zwykłej karcie przeglądarki jest wyłączone. Zainstaluj aplikację lokalnie na swoim urządzeniu i otwórz ją z ikony na ekranie głównym.
+          </p>
+        </div>
+
+        {hasCustomInviteInUrlOrHandoff && (
+          <div className="p-4 rounded-xl border border-[var(--vault-success)] bg-[var(--vault-bg)] space-y-3">
+            <div className="flex items-start gap-2.5">
+              <CheckCircle2 className="w-4 h-4 text-[var(--vault-success)] shrink-0 mt-0.5" />
+              <div className="space-y-1 text-xs">
+                <div className="font-semibold text-[var(--vault-text)]">
+                  Wykryto spersonalizowany link dostępowy do Skarbca Rodzinnego!
+                </div>
+                <p className="text-[var(--vault-muted)] leading-relaxed">
+                  Parametry zaproszenia oraz klucz odczytu wspólnego pliku z Google Drive Administratora zostały automatycznie zapisane w pamięci podręcznej <code>CacheStorage</code> tego urządzenia. Po zainstalowaniu i uruchomieniu aplikacji PWA Twoje zaproszenie otworzy się automatycznie.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleCopyCurrentCustomUrl}
+              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg transition-colors cursor-pointer"
+            >
+              {copiedCustomLink ? (
+                <>
+                  <Check className="w-3.5 h-3.5 text-[var(--vault-success)] shrink-0" />
+                  <span>Skopiowano spersonalizowany link do schowka!</span>
+                </>
+              ) : (
+                <>
+                  <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
+                  <span>
+                    Kopiuj ten link zaproszeniowy (na wypadek ręcznego wklejenia w PWA)
+                  </span>
+                </>
+              )}
+            </button>
+          </div>
+        )}
+
+        <div className="space-y-3">
+          <button
+            type="button"
+            onClick={onInstallPWA}
+            className="w-full inline-flex items-center justify-center gap-2 px-5 py-3.5 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer shadow-sm text-center"
+          >
+            <Download className="w-4 h-4 shrink-0" />
+            <span>
+              {canInstallPWA
+                ? 'Zainstaluj aplikację FamilyStream Vault (PWA)'
+                : 'Pokaż instrukcję instalacji PWA na tym telefonie'}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => onTriggerAppUpdate()}
+            disabled={isUpdatingApp}
+            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-bg)] hover:bg-[var(--vault-surface-hover)] rounded-xl transition-colors cursor-pointer"
+          >
+            <RefreshCw
+              className={`w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0 ${
+                isUpdatingApp ? 'animate-spin' : ''
+              }`}
+            />
+            <span>
+              {isUpdatingApp
+                ? 'Odświeżanie najnowszej wersji...'
+                : 'Odśwież wersję aplikacji przed instalacją'}
+            </span>
+          </button>
+        </div>
+
+        <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2.5 text-xs">
+          <div className="font-semibold text-[var(--vault-text)]">
+            Jak zainstalować aplikację w 10 sekund:
+          </div>
+          <ul className="list-disc list-inside space-y-1.5 text-[var(--vault-muted)] leading-relaxed">
+            <li>
+              <strong className="text-[var(--vault-text)]">
+                Android (Chrome / Edge / Brave):
+              </strong>{' '}
+              Kliknij przycisk powyżej lub otwórz menu przeglądarki (trzy kropki{' '}
+              <code>⋮</code> w prawym górnym rogu) i wybierz{' '}
+              <strong>„Zainstaluj aplikację”</strong> /{' '}
+              <strong>„Dodaj do ekranu głównego”</strong>.
+            </li>
+            <li>
+              <strong className="text-[var(--vault-text)]">
+                iPhone / iPad (Safari):
+              </strong>{' '}
+              Stuknij ikonę <strong>Udostępnij</strong> na dolnym pasku i wybierz{' '}
+              <strong>„Dodaj do ekranu początkowego”</strong>.
+            </li>
+            <li>
+              <strong className="text-[var(--vault-text)]">
+                Po instalacji:
+              </strong>{' '}
+              Zamknij tę kartę przeglądarki i uruchom <strong>FamilyStream Vault</strong> bezpośrednio z nowej ikony na ekranie telefonu.
+            </li>
+          </ul>
+        </div>
+      </div>
+    );
+  }
 
   // 1. DEVICE / ACCOUNT AUTHORIZATION WAITING SCREEN
   if (pendingAuthState) {
@@ -395,7 +653,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   }
 
   // Handlers
-  const handleAdminClick = async (skipOAuthPopup = false) => {
+  const handleAdminClick = async () => {
     setErrorMsg(null);
     setIsAdminLoading(true);
     try {
@@ -406,17 +664,22 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         );
       }
       await onAdminGoogleLogin({
-        email: adminEmailInput.trim() || undefined,
-        displayName: adminNameInput.trim() || undefined,
         masterPassword: adminMasterPasswordInput.trim() || undefined,
-        skipOAuthPopup,
+        skipOAuthPopup: false,
       });
     } catch (err) {
-      setErrorMsg(
+      const code = (err as { code?: string })?.code;
+      const message =
         err instanceof Error
           ? err.message
-          : 'Nie udało się zalogować jako Administrator.'
-      );
+          : 'Nie udało się zalogować jako Administrator przez Google.';
+      if (
+        code === 'MISSING_GOOGLE_CLIENT_ID' ||
+        message.includes('Client ID')
+      ) {
+        setShowOptionalOAuthConfig(true);
+      }
+      setErrorMsg(message);
     } finally {
       setIsAdminLoading(false);
     }
@@ -428,8 +691,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     await saveGoogleOAuthClientIdOnServer(cleaned).catch(() => {});
     setOauthSavedMsg(
       cleaned
-        ? 'Zapisano identyfikator Google OAuth Client ID.'
-        : 'Wyczyszczono opcjonalny Client ID — aktywny tryb bezkluczowy.'
+        ? 'Zapisano identyfikator Google OAuth Client ID! Kliknij teraz przycisk „Zaloguj przez Google” powyżej.'
+        : 'Wyczyszczono identyfikator Google OAuth Client ID.'
     );
   };
 
@@ -533,49 +796,149 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     }
   };
 
-  const handleApplyManualInvite = (e: React.FormEvent) => {
+  const handleApplyManualInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    const extracted = extractInviteTokenFromInput(manualInviteInput);
+    const raw = manualInviteInput.trim();
+    if (!raw) return;
+
+    const parsed = parseCustomInviteUrlParameters(raw);
+    if (
+      onSyncSharedVaultFromAdminDrive &&
+      parsed.syncEncryptionKey &&
+      (parsed.driveFileId || parsed.encryptedSnapshot)
+    ) {
+      setIsSyncingSharedDrive(true);
+      try {
+        await savePwaHandoffParameters(parsed);
+        const ok = await onSyncSharedVaultFromAdminDrive({
+          driveFileId: parsed.driveFileId,
+          syncEncryptionKey: parsed.syncEncryptionKey,
+          encryptedSnapshot: parsed.encryptedSnapshot,
+          inviteToken: parsed.inviteToken,
+        });
+        if (ok) {
+          setSharedDriveSyncedMsg(
+            'Pobrano i odszyfrowano wspólną bazę skarbca z Google Drive Administratora.'
+          );
+        }
+      } catch (err) {
+        console.warn('Błąd odczytu wspólnego pliku z linku:', err);
+      } finally {
+        setIsSyncingSharedDrive(false);
+      }
+    }
+
+    const extracted = parsed.inviteToken || extractInviteTokenFromInput(raw);
     if (!extracted) return;
     setInviteToken(extracted);
     setShowManualInviteBox(false);
     setManualInviteInput('');
   };
 
+  const renderGoogleOAuthClientSetupBox = () => (
+    <div className="pt-2 border-t border-[var(--vault-border)] space-y-2 text-xs">
+      <button
+        type="button"
+        onClick={() => setShowOptionalOAuthConfig((v) => !v)}
+        className="text-[11px] text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
+      >
+        {showOptionalOAuthConfig
+          ? 'Ukryj konfigurację identyfikatora Google OAuth Client ID'
+          : 'Konfiguracja Google OAuth Client ID (do okna „Wybierz konto Google” i Google Drive)'}
+      </button>
+
+      {showOptionalOAuthConfig && (
+        <div className="p-3.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2.5">
+          <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
+            Aby przeglądarka otwierała oficjalne okno wyboru konta Google (<code>accounts.google.com</code>) oraz synchronizowała plik <code>FamilyStreamVault_AutoSync.vault.enc</code> na Twoim Google Drive, wklej publiczny identyfikator <strong>Google OAuth Client ID</strong> (typ: <em>Web application</em>).
+          </p>
+
+          {currentOrigin && (
+            <div className="p-2.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-[10px] text-[var(--vault-muted)]">
+                  Authorized JavaScript origin (wklej w Google Cloud Console):
+                </div>
+                <div className="text-xs font-mono font-semibold text-[var(--vault-accent)] truncate">
+                  {currentOrigin}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCopyOrigin}
+                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-bg)] hover:bg-[var(--vault-surface-hover)] rounded-md cursor-pointer shrink-0"
+              >
+                {copiedOrigin ? (
+                  <>
+                    <Check className="w-3 h-3 text-[var(--vault-success)]" />
+                    <span>Skopiowano</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3 h-3 text-[var(--vault-accent)]" />
+                    <span>Kopiuj Origin</span>
+                  </>
+                )}
+              </button>
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={customOAuthClientId}
+              onChange={(e) => setCustomOAuthClientId(e.target.value)}
+              placeholder="np. 123456-abc.apps.googleusercontent.com"
+              className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] min-w-0"
+            />
+            <button
+              type="button"
+              onClick={handleSaveOptionalClientId}
+              className="px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer shrink-0"
+            >
+              Zapisz Client ID
+            </button>
+          </div>
+          {oauthSavedMsg && (
+            <div className="text-[11px] text-[var(--vault-success)]">
+              {oauthSavedMsg}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="max-w-lg mx-auto my-4 space-y-6">
       
-      {/* MAIN PAGE QUICK ACTION BAR: "Zainstaluj jako aplikację" + "Aktualizuj aplikację" */}
+      {/* MAIN PAGE QUICK ACTION BAR: PWA Status + Update */}
       <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-surface)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="space-y-0.5">
           <div className="text-xs font-semibold text-[var(--vault-text)] flex items-center gap-1.5">
-            <Smartphone className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+            <Smartphone className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
             <span>
-              {isPWAInstalled || detectedDevice.clientMode === 'pwa'
-                ? 'Aplikacja FamilyStream Vault jest zainstalowana'
-                : 'Zainstaluj skarbiec na ekranie głównym telefonu'}
+              {isRunningInInstalledPwa
+                ? 'Aplikacja FamilyStream Vault działa w trybie zainstalowanym (PWA)'
+                : 'Zainstaluj skarbiec jako aplikację PWA'}
             </span>
           </div>
           <p className="text-[11px] text-[var(--vault-muted)]">
-            {isPWAInstalled || detectedDevice.clientMode === 'pwa'
-              ? 'Kliknij „Aktualizuj aplikację”, aby pobrać najnowszą wersję bez utraty danych.'
+            {isRunningInInstalledPwa
+              ? 'Kliknij „Aktualizuj aplikację”, aby pobrać najnowszą wersję kodu z GitHub Pages bez utraty danych.'
               : 'Zainstaluj jako aplikację PWA na telefonie lub zaktualizuj program jednym kliknięciem.'}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {!isPWAInstalled && detectedDevice.clientMode !== 'pwa' && (
+          {!isRunningInInstalledPwa && (
             <button
               type="button"
               onClick={onInstallPWA}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer"
             >
               <Download className="w-3.5 h-3.5 shrink-0" />
-              <span>
-                {canInstallPWA
-                  ? 'Zainstaluj jako aplikację (PWA)'
-                  : 'Jak zainstalować aplikację lokalnie'}
-              </span>
+              <span>Zainstaluj jako aplikację (PWA)</span>
             </button>
           )}
 
@@ -597,80 +960,42 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         </div>
       </div>
 
-      {/* CASE 1: FRESH UNINITIALIZED INSTANCE FROM GITHUB -> FIRST ADMIN CLAIM */}
-      {!isVaultInitialized ? (
+      {sharedDriveSyncedMsg && (
+        <div className="p-3.5 rounded-xl border border-[var(--vault-success)] bg-[var(--vault-surface)] flex items-center gap-2.5 text-xs text-[var(--vault-success)]">
+          <Cloud className="w-4 h-4 shrink-0" />
+          <span>{sharedDriveSyncedMsg}</span>
+        </div>
+      )}
+
+      {/* CASE 1: FRESH UNINITIALIZED INSTANCE IN INSTALLED PWA -> ADMIN GOOGLE LOGIN & DRIVE CHECK */}
+      {!isVaultInitialized && !inviteToken ? (
         <div className="p-5 sm:p-7 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5 overflow-hidden">
           <div className="space-y-2">
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
-              <Sparkles className="w-4 h-4 shrink-0" />
+              <Cloud className="w-4 h-4 shrink-0" />
               <span>
-                Kreator Startowy Administratora · Czysta Instancja (0 Sekretów w Kodzie)
+                Autoryzacja Głównego Administratora · Google OAuth + Google Drive
               </span>
             </div>
             <h1 className="text-xl font-bold font-display text-[var(--vault-text)]">
-              Zainstaluj aplikację i zainicjuj Pierwszy Skarbiec
+              Połącz konto Google i sprawdź lub utwórz Skarbiec na Google Drive
             </h1>
             <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
-              Uruchomiłeś czystą aplikację online (np. z linku GitHub Pages). Nie musisz szukać ani wyciągać żadnych sekretów API — możesz od razu zainstalować aplikację lokalnie i utworzyć skarbiec <strong>przez Google</strong> lub <strong>bezpośrednio na tym urządzeniu</strong>.
+              Kliknij przycisk poniżej, aby otworzyć oficjalne okno wyboru konta Google. Aplikacja automatycznie sprawdzi na Twoim Google Drive, czy istnieje już zaszyfrowany plik <code>FamilyStreamVault_AutoSync.vault.enc</code> — jeśli tak, pobierze i odtworzy Twój skarbiec; jeśli to pierwsze logowanie, utworzy nową bazę.
             </p>
           </div>
 
-          {/* KROK 1: INSTALACJA LOKALNA PWA */}
-          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="space-y-1 min-w-0">
-              <div className="text-xs font-semibold text-[var(--vault-text)] flex items-center gap-1.5">
-                <Smartphone className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
-                <span>Krok 1: Zainstaluj aplikację lokalnie na telefonie / komputerze</span>
-              </div>
-              <p className="text-[11px] text-[var(--vault-muted)]">
-                Dodaj ikonę FamilyStream Vault na pulpit lub ekran główny, aby korzystać z izolowanego certyfikatu sprzętowego PWA.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={onInstallPWA}
-              className="inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer shrink-0"
-            >
-              <Download className="w-3.5 h-3.5 shrink-0" />
-              <span>
-                {isPWAInstalled || detectedDevice.clientMode === 'pwa'
-                  ? 'Aplikacja PWA zainstalowana'
-                  : 'Zainstaluj lokalnie (PWA)'}
-              </span>
-            </button>
-          </div>
-
-          {/* KROK 2: DANE KONTA ADMINISTRATORA (BEZ WYCIĄGANIA SEKRETÓW) */}
-          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-3">
-            <div className="text-xs font-semibold text-[var(--vault-text)]">
-              Krok 2: Twoje konto Głównego Administratora (login: <code className="font-mono text-[var(--vault-accent)]">admin</code>)
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
-                  Twój e-mail Google (do identyfikacji Admina)
-                </label>
-                <input
-                  type="email"
-                  value={adminEmailInput}
-                  onChange={(e) => setAdminEmailInput(e.target.value)}
-                  placeholder="np. twoj.email@gmail.com"
-                  className="w-full px-3 py-2 text-xs rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
-                />
-              </div>
-              <div>
-                <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
-                  Hasło główne Admina (opcjonalnie, min. 4 znaki)
-                </label>
-                <input
-                  type="password"
-                  value={adminMasterPasswordInput}
-                  onChange={(e) => setAdminMasterPasswordInput(e.target.value)}
-                  placeholder="Ułatwia logowanie hasłem..."
-                  className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
-                />
-              </div>
-            </div>
+          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
+            <label className="block text-[11px] font-medium text-[var(--vault-muted)]">
+              Opcjonalne hasło główne Admina (ułatwia awaryjne logowanie loginem <code className="font-mono text-[var(--vault-accent)]">admin</code>)
+            </label>
+            <input
+              type="password"
+              value={adminMasterPasswordInput}
+              onChange={(e) => setAdminMasterPasswordInput(e.target.value)}
+              placeholder="Opcjonalne hasło (min. 4 znaki)..."
+              className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+            />
           </div>
 
           {errorMsg && (
@@ -679,112 +1004,98 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             </div>
           )}
 
-          {/* KROK 3: OBA TRYBY STARTU (GOOGLE + LOKALNY BEZ KLUCZY) */}
-          <div className="space-y-2.5">
-            <button
-              type="button"
-              onClick={() => handleAdminClick(false)}
-              disabled={isAdminLoading}
-              className="gsi-material-button !w-full"
-            >
-              <div className="gsi-material-button-content-wrapper">
-                <div className="gsi-material-button-icon">
-                  <svg
-                    version="1.1"
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 48 48"
-                    style={{ display: 'block' }}
-                  >
-                    <path
-                      fill="#EA4335"
-                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                    ></path>
-                    <path
-                      fill="#4285F4"
-                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                    ></path>
-                    <path
-                      fill="#FBBC05"
-                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                    ></path>
-                    <path
-                      fill="#34A853"
-                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                    ></path>
-                    <path fill="none" d="M0 0h48v48H0z"></path>
-                  </svg>
-                </div>
-                <span className="gsi-material-button-contents">
-                  {isAdminLoading
-                    ? 'Tworzenie skarbca i łączenie...'
-                    : 'Zostań Pierwszym Administratorem i utwórz skarbiec (Google)'}
-                </span>
+          <button
+            type="button"
+            onClick={handleAdminClick}
+            disabled={isAdminLoading}
+            className="gsi-material-button !w-full"
+          >
+            <div className="gsi-material-button-content-wrapper">
+              <div className="gsi-material-button-icon">
+                <svg
+                  version="1.1"
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 48 48"
+                  style={{ display: 'block' }}
+                >
+                  <path
+                    fill="#EA4335"
+                    d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                  ></path>
+                  <path
+                    fill="#4285F4"
+                    d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                  ></path>
+                  <path
+                    fill="#FBBC05"
+                    d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                  ></path>
+                  <path
+                    fill="#34A853"
+                    d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                  ></path>
+                  <path fill="none" d="M0 0h48v48H0z"></path>
+                </svg>
               </div>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handleAdminClick(true)}
-              disabled={isAdminLoading}
-              className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer text-center leading-snug"
-            >
-              <ShieldCheck className="w-4 h-4 shrink-0" />
-              <span>
-                Szybki Start Lokalny: Utwórz skarbiec od razu na tym urządzeniu (Bez kluczy i sekretów)
+              <span className="gsi-material-button-contents">
+                {isAdminLoading
+                  ? 'Wybór konta Google i sprawdzanie Google Drive...'
+                  : 'Zaloguj przez Google (Wybierz konto i sprawdź Google Drive)'}
               </span>
-            </button>
-          </div>
+            </div>
+          </button>
 
-          {/* OPCJONALNE PODŁĄCZENIE WŁASNEGO GOOGLE CLOUD CLIENT ID */}
+          {/* Manual invite paste for family member who installed clean PWA first */}
           <div className="pt-2 border-t border-[var(--vault-border)] space-y-2 text-xs">
-            <button
-              type="button"
-              onClick={() => setShowOptionalOAuthConfig((v) => !v)}
-              className="text-[11px] text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
-            >
-              {showOptionalOAuthConfig
-                ? 'Ukryj opcjonalną konfigurację Google Cloud OAuth Client ID'
-                : 'Opcjonalnie dla zaawansowanych: Wklej własny Google OAuth Client ID (automatyczny Drive API)'}
-            </button>
-
-            {showOptionalOAuthConfig && (
-              <div className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
-                <p className="text-[11px] text-[var(--vault-muted)]">
-                  To pole jest <strong>całkowicie opcjonalne</strong>. Skarbiec oraz kopie zapasowe <code>.vault.enc</code> działają bez niego.
-                </p>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    value={customOAuthClientId}
-                    onChange={(e) => setCustomOAuthClientId(e.target.value)}
-                    placeholder="np. 123456-abc.apps.googleusercontent.com"
-                    className="flex-1 px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] min-w-0"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleSaveOptionalClientId}
-                    className="px-3 py-1.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
-                  >
-                    Zapisz Client ID
-                  </button>
-                </div>
-                {oauthSavedMsg && (
-                  <div className="text-[11px] text-[var(--vault-success)]">
-                    {oauthSavedMsg}
-                  </div>
-                )}
-              </div>
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
+              <span>Jesteś domownikiem i otrzymałeś spersonalizowany link od Admina?</span>
+              <button
+                type="button"
+                onClick={() => setShowManualInviteBox((v) => !v)}
+                className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
+              >
+                {showManualInviteBox
+                  ? 'Ukryj pole linku'
+                  : 'Wklej link zaproszeniowy'}
+              </button>
+            </div>
+            {showManualInviteBox && (
+              <form
+                onSubmit={handleApplyManualInvite}
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1"
+              >
+                <input
+                  type="text"
+                  value={manualInviteInput}
+                  onChange={(e) => setManualInviteInput(e.target.value)}
+                  placeholder="Wklej pełny link zaproszeniowy od Administratora..."
+                  className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
+                />
+                <button
+                  type="submit"
+                  disabled={isSyncingSharedDrive}
+                  className="px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
+                >
+                  {isSyncingSharedDrive
+                    ? 'Pobieranie bazy...'
+                    : 'Pobierz bazę i otwórz'}
+                </button>
+              </form>
             )}
           </div>
+
+          {renderGoogleOAuthClientSetupBox()}
         </div>
       ) : null}
 
       {/* CASE 2: INVITATION OR RECOVERY LINK MODE (?invite=TOKEN) */}
       {inviteToken && (
         <div className="p-6 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5">
-          {isVerifyingInvite ? (
+          {isSyncingSharedDrive || isVerifyingInvite ? (
             <div className="py-6 text-center text-xs text-[var(--vault-muted)]">
-              Weryfikacja kryptograficznego linku zaproszeniowego na serwerze...
+              {isSyncingSharedDrive
+                ? 'Pobieranie i odszyfrowywanie wspólnego pliku skarbca z Google Drive Administratora...'
+                : 'Weryfikacja kryptograficznego linku zaproszeniowego...'}
             </div>
           ) : inviteError || !verifiedInvite ? (
             <div className="space-y-4">
@@ -792,11 +1103,11 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <h2 className="text-base font-bold font-display text-[var(--vault-text)]">
-                    Link zaproszeniowy jest nieaktywny
+                    Link zaproszeniowy wymaga synchronizacji z bazą Administratora
                   </h2>
                   <p className="text-xs text-[var(--vault-danger)]">
                     {inviteError ||
-                      'Ten link został już wykorzystany lub stracił ważność.'}
+                      'Ten link został już wykorzystany, stracił ważność lub brakuje połączenia ze wspólnym plikiem Google Drive.'}
                   </p>
                 </div>
               </div>
@@ -805,7 +1116,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 onClick={clearInviteFromUrlAndState}
                 className="w-full py-2.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer"
               >
-                Przejdź do ekranu logowania
+                Przejdź do ekranu głównego
               </button>
             </div>
           ) : (
@@ -976,7 +1287,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         </div>
       )}
 
-      {/* CASE 3: INITIALIZED VAULT STANDARD LOGIN SCREEN (No open registration without an invite link!) */}
+      {/* CASE 3: INITIALIZED VAULT STANDARD LOGIN SCREEN */}
       {isVaultInitialized && !inviteToken && (
         <>
           {/* 1-Touch Fingerprint Unlock (if already paired on this device) */}
@@ -1039,7 +1350,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             </div>
 
             {errorMsg && (
-              <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)]">
+              <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
                 {errorMsg}
               </div>
             )}
@@ -1093,7 +1404,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             <div className="pt-3 border-t border-[var(--vault-border)] space-y-2.5 text-xs">
               <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
                 <span>
-                  Nie masz konta lub zapomniałeś hasła? Poproś Administratora lub Zaufanego Opiekuna (np. brata) o link.
+                  Nie masz konta lub zapomniałeś hasła? Poproś Administratora lub Zaufanego Opiekuna (np. brata) o spersonalizowany link.
                 </span>
                 <button
                   type="button"
@@ -1109,20 +1420,23 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               {showManualInviteBox && (
                 <form
                   onSubmit={handleApplyManualInvite}
-                  className="flex items-center gap-2 pt-1"
+                  className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1"
                 >
                   <input
                     type="text"
                     value={manualInviteInput}
                     onChange={(e) => setManualInviteInput(e.target.value)}
-                    placeholder="Wklej tutaj link zaproszeniowy lub kod fsv_invite_..."
+                    placeholder="Wklej tutaj spersonalizowany link zaproszeniowy..."
                     className="flex-1 px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
                   />
                   <button
                     type="submit"
+                    disabled={isSyncingSharedDrive}
                     className="px-3.5 py-1.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
                   >
-                    Otwórz zaproszenie
+                    {isSyncingSharedDrive
+                      ? 'Synchronizacja...'
+                      : 'Otwórz zaproszenie'}
                   </button>
                 </form>
               )}
@@ -1136,20 +1450,25 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 <span className="font-semibold text-[var(--vault-accent)]">
                   02. Główny Administrator Skarbca (Google OAuth + Google Drive)
                 </span>
-                <span className="inline-flex items-center gap-1 font-mono text-[11px] text-[var(--vault-muted)]">
+                <span className="inline-flex items-center gap-1 font-mono text-[11px] text-[var(--vault-muted)] shrink-0">
                   <Lock className="w-3 h-3 text-[var(--vault-success)]" />
                   <span>AES-256-GCM</span>
                 </span>
               </div>
-              <p className="text-xs text-[var(--vault-muted)]">
+              <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
                 Konto Głównego Administratora (
-                {bootstrapStatus?.adminEmailHint || 'zainicjalizowane'}) oraz szyfrowany plik kopii na Google Drive są aktywne.
+                <strong>
+                  {bootstrapStatus?.adminEmailHint ||
+                    vaultConfig?.adminEmail ||
+                    'zainicjalizowane'}
+                </strong>
+                ) oraz szyfrowany plik kopii na Google Drive są aktywne. Kliknięcie przycisku poniżej zawsze otwiera oficjalne okno wyboru konta Google i synchronizuje stan z Google Drive.
               </p>
             </div>
 
             <button
               type="button"
-              onClick={() => handleAdminClick(false)}
+              onClick={handleAdminClick}
               disabled={isAdminLoading || isFamilyLoading}
               className="gsi-material-button !w-full"
             >
@@ -1182,11 +1501,29 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 </div>
                 <span className="gsi-material-button-contents">
                   {isAdminLoading
-                    ? 'Weryfikacja sesji i otwieranie skarbca...'
+                    ? 'Wybór konta Google i sprawdzanie Google Drive...'
                     : 'Zaloguj jako Główny Administrator przez Google'}
                 </span>
               </div>
             </button>
+
+            {onResetLocalVaultInstance && (
+              <div className="pt-1 flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)]">
+                <span>
+                  Widzisz stare konto testowe (np. <code>adm***@familystream.local</code>)?
+                </span>
+                <button
+                  type="button"
+                  onClick={onResetLocalVaultInstance}
+                  className="inline-flex items-center gap-1 text-[var(--vault-accent)] hover:underline font-medium cursor-pointer shrink-0"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>Zresetuj lokalny stan urządzenia</span>
+                </button>
+              </div>
+            )}
+
+            {renderGoogleOAuthClientSetupBox()}
 
                       </div>
         </>
@@ -1194,3 +1531,4 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     </div>
   );
 };
+

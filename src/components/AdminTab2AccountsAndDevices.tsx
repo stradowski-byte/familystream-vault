@@ -41,6 +41,9 @@ interface AdminTab2AccountsAndDevicesProps {
   invitations: VaultInvitation[];
   activityLogs: ActivityLog[];
   currentAdmin: Member;
+  driveSyncFileId?: string;
+  syncEncryptionKey?: string;
+  googleOAuthClientId?: string;
   onCreateInvitation: (params: {
     purpose: InvitationPurpose;
     mode: InvitationMode;
@@ -86,6 +89,9 @@ export const AdminTab2AccountsAndDevices: React.FC<
   invitations,
   activityLogs,
   currentAdmin,
+  driveSyncFileId,
+  syncEncryptionKey,
+  googleOAuthClientId,
   onCreateInvitation,
   onDeleteInvitation,
   onApproveMemberAndDevices,
@@ -160,10 +166,16 @@ export const AdminTab2AccountsAndDevices: React.FC<
   const targetMember = activeMembers.find((m) => m.id === targetMergeId);
 
   const buildInviteUrl = (token: string): string => {
-    if (typeof window === 'undefined') return `?invite=${token}`;
-    return `${window.location.origin}${window.location.pathname}?invite=${encodeURIComponent(
-      token
-    )}`;
+    const base =
+      typeof window !== 'undefined'
+        ? `${window.location.origin}${window.location.pathname}`
+        : '';
+    const params = new URLSearchParams();
+    params.set('invite', token);
+    if (driveSyncFileId) params.set('gdf', driveSyncFileId);
+    if (syncEncryptionKey) params.set('vkey', syncEncryptionKey);
+    if (googleOAuthClientId) params.set('cid', googleOAuthClientId);
+    return `${base}?${params.toString()}`;
   };
 
   const handleCopyInviteUrl = async (inv: VaultInvitation) => {

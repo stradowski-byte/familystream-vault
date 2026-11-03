@@ -58,6 +58,8 @@ import {
   connectGoogleDriveOAuthDirect,
   downloadVaultBackupFromDrive,
   getGoogleAccessToken,
+  getOAuthClientId,
+  pullSharedVaultStateFromAdminDriveForMember,
   pullVaultStateFromDriveAutoSync,
   pushVaultStateToDriveAutoSync,
   setConfiguredGoogleOAuthClientId,
@@ -545,7 +547,7 @@ export default function App() {
     return updatedState;
   };
 
-  // 1. FIRST-ADMIN CLAIM & ADMIN GOOGLE LOGIN
+  // 1. FIRST-ADMIN CLAIM & ADMIN GOOGLE LOGIN (Always checks Google Drive for existing Vault first!)
   const handleAdminGoogleLogin = async (options?: {
     email?: string;
     displayName?: string;
@@ -569,15 +571,12 @@ export default function App() {
       deviceName: detectedDevice.deviceName,
     });
     let serverState = sessionHandshake.state;
-    const activeSyncKey =
+    let activeSyncKey =
       sessionHandshake.syncEncryptionKey || syncEncryptionKey;
 
-    // If the server database is empty and we have a Google Drive token, check if encrypted `FamilyStreamVault_AutoSync.vault.enc` exists on Google Drive
-    if (
-      identity.accessToken &&
-      serverState.members.length === 0 &&
-      serverState.passwords.length === 0
-    ) {
+    // ALWAYS check the selected Google Account's Google Drive for an existing `FamilyStreamVault_AutoSync.vault.enc` file!
+    let restoredExistingVaultFromDrive = false;
+    if (identity.accessToken) {
       try {
         const pulled = await pullVaultStateFromDriveAutoSync(
           identity.accessToken,
@@ -589,14 +588,21 @@ export default function App() {
           Array.isArray(pulled.state.members) &&
           pulled.state.members.length > 0
         ) {
+          restoredExistingVaultFromDrive = true;
+          if (pulled.syncEncryptionKey) {
+            activeSyncKey = pulled.syncEncryptionKey;
+            setSyncEncryptionKey(pulled.syncEncryptionKey);
+          }
           serverState = await replaceVaultStateOnServer({
             ...pulled.state,
             driveSyncFileId: pulled.fileId,
+            syncEncryptionKey: activeSyncKey,
           });
+          setDriveSyncFileId(pulled.fileId);
           setLastDriveAutoSyncAt(new Date().toISOString());
         }
       } catch (err) {
-        console.warn('Auto-Pull z Google Drive przy starcie pominięty:', err);
+        console.warn('Sprawdzanie Google Drive przy logowaniu:', err);
       }
     }
 
@@ -644,7 +650,7 @@ export default function App() {
       const configDoc: VaultConfig = {
         initialized: true,
         adminUid: identity.uid,
-        adminEmail: identity.email || 'admin@familystream.local',
+        adminEmail: identity.email,
         adminMemberId,
         templatesLoaded: false,
         categoriesJson: JSON.stringify(DEFAULT_CATEGORIES),
@@ -658,12 +664,24 @@ export default function App() {
       await saveVaultConfigOnServer(configDoc);
       serverState = await saveMemberOnServer(adminMember.id, adminMember);
     } else {
-      if (adminMember.role !== 'admin' || adminMember.status !== 'active') {
+      const shouldUpdateIdentity =
+        adminMember.role !== 'admin' ||
+        adminMember.status !== 'active' ||
+        adminMember.googleUid !== identity.uid ||
+        (identity.displayName &&
+          adminMember.fullName === 'Główny Administrator');
+
+      if (shouldUpdateIdentity) {
         adminMember = {
           ...adminMember,
+          fullName:
+            adminMember.fullName === 'Główny Administrator' &&
+            identity.displayName
+              ? identity.displayName
+              : adminMember.fullName,
           role: 'admin',
           status: 'active',
-          googleUid: adminMember.googleUid || identity.uid,
+          googleUid: identity.uid,
           updatedAt: now,
         };
         serverState = await saveMemberOnServer(adminMember.id, adminMember);
@@ -674,18 +692,29 @@ export default function App() {
         adminMember.pbkdf2Salt
       );
 
-      if (!serverState.vaultConfig || !serverState.vaultConfig.initialized) {
+      const isLocalPlaceholderEmail =
+        !serverState.vaultConfig?.adminEmail ||
+        serverState.vaultConfig.adminEmail.endsWith('.local');
+
+      if (
+        !serverState.vaultConfig ||
+        !serverState.vaultConfig.initialized ||
+        isLocalPlaceholderEmail
+      ) {
         const configDoc: VaultConfig = {
           initialized: true,
           adminUid: identity.uid,
-          adminEmail: identity.email || 'admin@familystream.local',
+          adminEmail: identity.email,
           adminMemberId: adminMember.id,
-          templatesLoaded: false,
-          categoriesJson: JSON.stringify(DEFAULT_CATEGORIES),
-          defaultTheme: theme,
-          clipboardClearSeconds: 30,
-          autoLockMinutes: 15,
-          createdAt: now,
+          templatesLoaded: serverState.vaultConfig?.templatesLoaded ?? false,
+          categoriesJson:
+            serverState.vaultConfig?.categoriesJson ||
+            JSON.stringify(DEFAULT_CATEGORIES),
+          defaultTheme: serverState.vaultConfig?.defaultTheme || theme,
+          clipboardClearSeconds:
+            serverState.vaultConfig?.clipboardClearSeconds || 30,
+          autoLockMinutes: serverState.vaultConfig?.autoLockMinutes || 15,
+          createdAt: serverState.vaultConfig?.createdAt || now,
           updatedAt: now,
         };
         serverState = await saveVaultConfigOnServer(configDoc);
@@ -750,8 +779,10 @@ export default function App() {
       adminMember.fullName,
       isFirstBootstrap ? 'VAULT_BOOTSTRAP' : 'ADMIN_GOOGLE_LOGIN',
       isFirstBootstrap
-        ? `Zainicjalizowano nowy skarbiec dla Pierwszego Administratora (${identity.email}).`
-        : `Główny Administrator zalogował się i pobrał bazę z serwera (${identity.email}).`,
+        ? `Zainicjalizowano nowy skarbiec dla Pierwszego Administratora (${identity.email}) i zapisano plik na Google Drive.`
+        : restoredExistingVaultFromDrive
+          ? `Wykryto istniejący skarbiec na Google Drive (${identity.email}) — pobrano i odblokowano bazę.`
+          : `Główny Administrator zalogował się kontem Google (${identity.email}) i zsynchronizował Google Drive.`,
       identity.accessToken
     );
 
@@ -760,11 +791,74 @@ export default function App() {
     setActiveMergedDeks(mergedDeks);
     setIsVaultLockedByTimeout(false);
     showToast(
-      isFirstBootstrap
-        ? 'Zostałeś Pierwszym Administratorem skarbca! Możesz teraz tworzyć linki zaproszeniowe dla rodziny.'
-        : `Zalogowano jako Główny Administrator (${adminMember.fullName})!`
+      restoredExistingVaultFromDrive
+        ? `Wykryto istniejący skarbiec na Google Drive (${identity.email}) i przywrócono bazę!`
+        : isFirstBootstrap
+          ? `Utworzono nowy skarbiec dla ${identity.email} i zapisano na Google Drive!`
+          : `Zalogowano przez Google jako ${identity.email}!`
     );
   };
+
+  // Sync shared encrypted vault file from Admin's Google Drive when a Family Member opens a customized invitation link inside the installed PWA
+  const handleSyncSharedVaultFromAdminDrive = useCallback(
+    async (params: {
+      driveFileId?: string;
+      syncEncryptionKey: string;
+      encryptedSnapshot?: string;
+      inviteToken?: string;
+    }): Promise<boolean> => {
+      const pulled = await pullSharedVaultStateFromAdminDriveForMember({
+        driveFileId: params.driveFileId,
+        syncEncryptionKey: params.syncEncryptionKey,
+        encryptedSnapshot: params.encryptedSnapshot,
+      });
+      if (
+        !pulled ||
+        !pulled.state ||
+        !Array.isArray(pulled.state.members) ||
+        pulled.state.members.length === 0
+      ) {
+        return false;
+      }
+
+      const updatedState = await replaceVaultStateOnServer({
+        ...pulled.state,
+        driveSyncFileId: params.driveFileId || pulled.state.driveSyncFileId,
+        syncEncryptionKey: params.syncEncryptionKey,
+      });
+      applyServerState(updatedState);
+      return true;
+    },
+    [applyServerState]
+  );
+
+  // Reset local standalone state (e.g. clearing old `adm***@familystream.local` cache on phone)
+  const handleResetLocalVaultInstance = useCallback(async () => {
+    try {
+      window.localStorage.removeItem('fsv_standalone_state_v1');
+      window.localStorage.removeItem('fsv_standalone_session_v1');
+      window.localStorage.removeItem('fsv_pwa_handoff_v1');
+      const emptyState = await replaceVaultStateOnServer({
+        vaultConfig: null,
+        members: [],
+        devices: [],
+        passwords: [],
+        invitations: [],
+        activityLogs: [],
+        driveSyncFileId: '',
+      });
+      applyServerState(emptyState);
+      const latestBoot = await fetchBootstrapStatusFromServer().catch(
+        () => null
+      );
+      if (latestBoot) setBootstrapStatus(latestBoot);
+      showToast(
+        'Wyczyszczono lokalny stan testowy! Kliknij teraz „Zaloguj przez Google”, aby wybrać swoje konto Google.'
+      );
+    } catch (err) {
+      console.warn('Reset local instance error:', err);
+    }
+  }, [applyServerState]);
 
   
   // 2. LOGIN WITH INTERNAL CREDENTIALS (Family Members, Co-Admins & Admin)
@@ -2503,6 +2597,10 @@ export default function App() {
             onRequestDeviceAuthorization={handleRequestDeviceAuthorization}
             onUnlockWithBiometrics={handleUnlockWithBiometrics}
             onCancelPendingState={() => setPendingAuthState(null)}
+            onSyncSharedVaultFromAdminDrive={
+              handleSyncSharedVaultFromAdminDrive
+            }
+            onResetLocalVaultInstance={handleResetLocalVaultInstance}
                       />
         ) : (
           <div className="space-y-6">
@@ -2567,6 +2665,11 @@ export default function App() {
                 invitations={invitations}
                 activityLogs={activityLogs}
                 currentAdmin={currentMember}
+                driveSyncFileId={driveSyncFileId}
+                syncEncryptionKey={syncEncryptionKey}
+                googleOAuthClientId={
+                  bootstrapStatus?.googleOAuthClientId || getOAuthClientId()
+                }
                 onCreateInvitation={handleCreateInvitation}
                 onDeleteInvitation={handleDeleteInvitation}
                 onApproveMemberAndDevices={handleApproveMemberAndDevices}

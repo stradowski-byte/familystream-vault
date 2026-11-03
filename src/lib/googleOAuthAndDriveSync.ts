@@ -11,9 +11,15 @@ export const DRIVE_SCOPES = [
 export const AUTO_SYNC_DRIVE_FILENAME = 'FamilyStreamVault_AutoSync.vault.enc';
 export const LEGACY_AUTO_SYNC_DRIVE_FILENAME = 'FamilyStreamVault_AutoSync.json';
 
+const LOCAL_OAUTH_CLIENT_ID_KEY = 'fsv_google_oauth_client_id_v1';
+const LOCAL_PWA_HANDOFF_KEY = 'fsv_pwa_handoff_v1';
+const PWA_HANDOFF_CACHE_NAME = 'fsv-pwa-handoff-cache-v1';
+const PWA_HANDOFF_CACHE_URL = '/__fsv_pwa_handoff__.json';
+
 let configuredServerOAuthClientId: string = '';
 let cachedAccessToken: string | null = null;
 let gisScriptPromise: Promise<void> | null = null;
+let publicRuntimeConfigLoaded = false;
 
 export interface AdminGoogleIdentity {
   uid: string;
@@ -27,6 +33,16 @@ export interface DriveBackupFileItem {
   name: string;
   modifiedTime: string;
   size?: string;
+}
+
+export interface PwaHandoffParameters {
+  inviteToken?: string;
+  driveFileId?: string;
+  syncEncryptionKey?: string;
+  googleOAuthClientId?: string;
+  encryptedSnapshot?: string;
+  rawInviteUrl?: string;
+  savedAt: string;
 }
 
 declare global {
@@ -56,14 +72,213 @@ declare global {
 export function setConfiguredGoogleOAuthClientId(
   clientId?: string | null
 ): void {
-  configuredServerOAuthClientId = (clientId || '').trim();
+  const clean = (clientId || '').trim();
+  if (clean) {
+    configuredServerOAuthClientId = clean;
+    try {
+      localStorage.setItem(LOCAL_OAUTH_CLIENT_ID_KEY, clean);
+    } catch {
+      // ignore storage errors
+    }
+  }
 }
 
 export function getOAuthClientId(): string {
   const envClientId = (
     import.meta as unknown as { env?: Record<string, string | undefined> }
   ).env?.VITE_GOOGLE_OAUTH_CLIENT_ID;
-  return (envClientId && envClientId.trim()) || configuredServerOAuthClientId;
+  if (envClientId && envClientId.trim()) return envClientId.trim();
+  if (configuredServerOAuthClientId) return configuredServerOAuthClientId;
+  try {
+    const stored = localStorage.getItem(LOCAL_OAUTH_CLIENT_ID_KEY);
+    if (stored && stored.trim()) return stored.trim();
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+export async function loadPublicRuntimeOAuthConfig(): Promise<string> {
+  const current = getOAuthClientId();
+  if (current || publicRuntimeConfigLoaded || typeof window === 'undefined') {
+    return current;
+  }
+  publicRuntimeConfigLoaded = true;
+  try {
+    const res = await fetch(`./vault-public-config.json?_cb=${Date.now()}`, {
+      cache: 'no-store',
+    });
+    if (res.ok) {
+      const data = (await res.json()) as { googleOAuthClientId?: string };
+      if (data?.googleOAuthClientId && data.googleOAuthClientId.trim()) {
+        setConfiguredGoogleOAuthClientId(data.googleOAuthClientId.trim());
+        return data.googleOAuthClientId.trim();
+      }
+    }
+  } catch {
+    // ignore when not present
+  }
+  return getOAuthClientId();
+}
+
+export function parseCustomInviteUrlParameters(
+  rawUrlOrQuery?: string
+): Partial<PwaHandoffParameters> {
+  if (typeof window === 'undefined' && !rawUrlOrQuery) return {};
+  try {
+    const source = rawUrlOrQuery
+      ? rawUrlOrQuery.trim()
+      : window.location.href;
+    const url = new URL(
+      source.startsWith('http')
+        ? source
+        : `${window.location.origin}${
+            source.startsWith('/') ? '' : '/'
+          }${source}`
+    );
+    const params = url.searchParams;
+    const hashParams = new URLSearchParams(
+      url.hash.startsWith('#') ? url.hash.slice(1) : url.hash
+    );
+
+    const inviteToken = (
+      params.get('invite') ||
+      hashParams.get('invite') ||
+      ''
+    ).trim();
+    const driveFileId = (
+      params.get('gdf') ||
+      hashParams.get('gdf') ||
+      ''
+    ).trim();
+    const syncEncryptionKey = (
+      params.get('vkey') ||
+      hashParams.get('vkey') ||
+      ''
+    ).trim();
+    const googleOAuthClientId = (
+      params.get('cid') ||
+      hashParams.get('cid') ||
+      ''
+    ).trim();
+    const encryptedSnapshot = (
+      hashParams.get('snap') ||
+      params.get('snap') ||
+      ''
+    ).trim();
+
+    if (googleOAuthClientId) {
+      setConfiguredGoogleOAuthClientId(googleOAuthClientId);
+    }
+
+    return {
+      ...(inviteToken ? { inviteToken } : {}),
+      ...(driveFileId ? { driveFileId } : {}),
+      ...(syncEncryptionKey ? { syncEncryptionKey } : {}),
+      ...(googleOAuthClientId ? { googleOAuthClientId } : {}),
+      ...(encryptedSnapshot ? { encryptedSnapshot } : {}),
+      rawInviteUrl: source,
+    };
+  } catch {
+    return {};
+  }
+}
+
+export async function savePwaHandoffParameters(
+  partial: Partial<PwaHandoffParameters>
+): Promise<PwaHandoffParameters | null> {
+  if (typeof window === 'undefined') return null;
+
+  let existing: Partial<PwaHandoffParameters> = {};
+  try {
+    const raw = localStorage.getItem(LOCAL_PWA_HANDOFF_KEY);
+    if (raw) existing = JSON.parse(raw) as Partial<PwaHandoffParameters>;
+  } catch {
+    // ignore
+  }
+
+  const merged: PwaHandoffParameters = {
+    ...existing,
+    ...partial,
+    savedAt: new Date().toISOString(),
+  };
+
+  if (merged.googleOAuthClientId) {
+    setConfiguredGoogleOAuthClientId(merged.googleOAuthClientId);
+  }
+
+  try {
+    localStorage.setItem(LOCAL_PWA_HANDOFF_KEY, JSON.stringify(merged));
+  } catch {
+    // ignore
+  }
+
+  if ('caches' in window) {
+    try {
+      const cache = await window.caches.open(PWA_HANDOFF_CACHE_NAME);
+      await cache.put(
+        new Request(PWA_HANDOFF_CACHE_URL),
+        new Response(JSON.stringify(merged), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    } catch {
+      // ignore cache storage errors
+    }
+  }
+
+  return merged;
+}
+
+export async function loadPwaHandoffParameters(): Promise<PwaHandoffParameters | null> {
+  if (typeof window === 'undefined') return null;
+
+  const fromUrl = parseCustomInviteUrlParameters();
+  if (
+    fromUrl.inviteToken ||
+    fromUrl.driveFileId ||
+    fromUrl.syncEncryptionKey ||
+    fromUrl.googleOAuthClientId ||
+    fromUrl.encryptedSnapshot
+  ) {
+    return savePwaHandoffParameters(fromUrl);
+  }
+
+  try {
+    const raw = localStorage.getItem(LOCAL_PWA_HANDOFF_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as PwaHandoffParameters;
+      if (parsed.googleOAuthClientId) {
+        setConfiguredGoogleOAuthClientId(parsed.googleOAuthClientId);
+      }
+      return parsed;
+    }
+  } catch {
+    // ignore
+  }
+
+  if ('caches' in window) {
+    try {
+      const cache = await window.caches.open(PWA_HANDOFF_CACHE_NAME);
+      const res = await cache.match(new Request(PWA_HANDOFF_CACHE_URL));
+      if (res && res.ok) {
+        const parsed = (await res.json()) as PwaHandoffParameters;
+        if (parsed.googleOAuthClientId) {
+          setConfiguredGoogleOAuthClientId(parsed.googleOAuthClientId);
+        }
+        try {
+          localStorage.setItem(LOCAL_PWA_HANDOFF_KEY, JSON.stringify(parsed));
+        } catch {
+          // ignore
+        }
+        return parsed;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
 }
 
 function loadGoogleIdentityServicesScript(): Promise<void> {
@@ -104,11 +319,22 @@ function loadGoogleIdentityServicesScript(): Promise<void> {
 async function requestDirectGoogleOAuthToken(
   promptMode: '' | 'select_account' | 'consent' = 'select_account'
 ): Promise<string> {
+  await loadPublicRuntimeOAuthConfig();
   await loadGoogleIdentityServicesScript();
 
   const clientId = getOAuthClientId();
-  if (!clientId || !window.google?.accounts?.oauth2) {
-    throw new Error('Brak konfiguracji klienta Google OAuth 2.0.');
+  if (!clientId) {
+    const err = new Error(
+      'Aby otworzyć oficjalne okno wyboru konta Google (Wybierz konto Google), podaj raz publiczny identyfikator Google OAuth Client ID.'
+    ) as Error & { code?: string };
+    err.code = 'MISSING_GOOGLE_CLIENT_ID';
+    throw err;
+  }
+
+  if (!window.google?.accounts?.oauth2) {
+    throw new Error(
+      'Biblioteka Google Identity Services nie została załadowana. Sprawdź połączenie z internetem.'
+    );
   }
 
   return new Promise<string>((resolve, reject) => {
@@ -117,10 +343,12 @@ async function requestDirectGoogleOAuthToken(
       if (!settled) {
         settled = true;
         reject(
-          new Error('Przekroczono czas oczekiwania na okno Google OAuth.')
+          new Error(
+            'Przekroczono czas oczekiwania na wybór konta w oknie Google.'
+          )
         );
       }
-    }, 45000);
+    }, 60000);
 
     const tokenClient = window.google!.accounts!.oauth2!.initTokenClient({
       client_id: clientId,
@@ -135,7 +363,7 @@ async function requestDirectGoogleOAuthToken(
             new Error(
               response.error_description ||
                 response.error ||
-                'Nie uzyskano tokenu Google OAuth.'
+                'Nie wybrano konta Google lub odmówiono dostępu.'
             )
           );
           return;
@@ -151,7 +379,7 @@ async function requestDirectGoogleOAuthToken(
           new Error(
             err?.message ||
               err?.type ||
-              'Zamknięto lub zablokowano okno Google OAuth.'
+              'Zamknięto okno wyboru konta Google przed zakończeniem logowania.'
           )
         );
       },
@@ -170,65 +398,37 @@ async function fetchGoogleUserInfo(
     },
   });
   if (!res.ok) {
-    throw new Error(`Błąd pobierania profilu Google (${res.status})`);
+    throw new Error(`Błąd pobierania profilu konta Google (${res.status})`);
   }
   const data = (await res.json()) as {
     sub?: string;
     email?: string;
     name?: string;
   };
+  if (!data.email) {
+    throw new Error('Wybrane konto Google nie zwróciło adresu e-mail.');
+  }
   return {
-    sub: data.sub || 'first_admin_google',
-    email: data.email || 'admin@familystream.local',
-    name: data.name || 'Główny Administrator',
+    sub: data.sub || `google_${data.email}`,
+    email: data.email,
+    name: data.name || data.email.split('@')[0] || 'Główny Administrator',
   };
 }
 
 /**
- * Direct Google OAuth 2.0 Admin Login (Zero Firebase).
- * Requests an OAuth token with Google Drive scope directly from Google Identity Services.
- * Any Google account used on the first run of a clean instance claims the Primary Administrator role.
+ * Direct Google OAuth 2.0 Admin Login.
+ * ALWAYS forces the real Google Account Chooser (`prompt: 'select_account'`)
+ * and NEVER silently falls back to `admin@familystream.local`.
  */
-export async function signInWithGoogleAdminDirect(customIdentity?: {
-  email?: string;
-  displayName?: string;
-  skipOAuthPopup?: boolean;
-}): Promise<AdminGoogleIdentity> {
-  const fallbackEmail =
-    (customIdentity?.email || '').trim() || 'admin@familystream.local';
-  const fallbackName =
-    (customIdentity?.displayName || '').trim() || 'Główny Administrator';
-
-  if (customIdentity?.skipOAuthPopup || !getOAuthClientId()) {
-    return {
-      uid: `admin_${fallbackEmail.toLowerCase().replace(/[^a-z0-9]/g, '_')}`,
-      email: fallbackEmail,
-      displayName: fallbackName,
-      accessToken: cachedAccessToken || '',
-    };
-  }
-
-  try {
-    const token = await requestDirectGoogleOAuthToken('select_account');
-    const profile = await fetchGoogleUserInfo(token);
-    return {
-      uid: profile.sub,
-      email: profile.email || fallbackEmail,
-      displayName: profile.name || fallbackName,
-      accessToken: token,
-    };
-  } catch (err) {
-    console.warn(
-      'Okno Google OAuth zostało zamknięte lub pominięte — użycie sesji Głównego Administratora instancji:',
-      err
-    );
-    return {
-      uid: `admin_${fallbackEmail.toLowerCase().replace(/[^a-z0-9]/g, '_')}`,
-      email: fallbackEmail,
-      displayName: fallbackName,
-      accessToken: cachedAccessToken || '',
-    };
-  }
+export async function signInWithGoogleAdminDirect(): Promise<AdminGoogleIdentity> {
+  const token = await requestDirectGoogleOAuthToken('select_account');
+  const profile = await fetchGoogleUserInfo(token);
+  return {
+    uid: profile.sub,
+    email: profile.email,
+    displayName: profile.name,
+    accessToken: token,
+  };
 }
 
 /**
@@ -254,11 +454,16 @@ export function setGoogleAccessTokenInMemory(token: string | null) {
  */
 export async function findAutoSyncFileOnDrive(
   accessToken: string
-): Promise<{ id: string; name: string; modifiedTime: string } | null> {
+): Promise<{
+  id: string;
+  name: string;
+  modifiedTime: string;
+  appProperties?: Record<string, string>;
+} | null> {
   const query = encodeURIComponent(
     `(name = '${AUTO_SYNC_DRIVE_FILENAME}' or name = '${LEGACY_AUTO_SYNC_DRIVE_FILENAME}') and trashed = false`
   );
-  const url = `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name,modifiedTime)&orderBy=modifiedTime desc&pageSize=5`;
+  const url = `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name,modifiedTime,appProperties)&orderBy=modifiedTime desc&pageSize=5`;
 
   const res = await fetch(url, {
     headers: {
@@ -273,15 +478,50 @@ export async function findAutoSyncFileOnDrive(
   }
 
   const data = (await res.json()) as {
-    files?: Array<{ id: string; name: string; modifiedTime: string }>;
+    files?: Array<{
+      id: string;
+      name: string;
+      modifiedTime: string;
+      appProperties?: Record<string, string>;
+    }>;
   };
   if (!data.files || data.files.length === 0) return null;
 
-  // Prefer the AES-256-GCM encrypted `.vault.enc` file if both exist
   const preferredEnc = data.files.find(
     (f) => f.name === AUTO_SYNC_DRIVE_FILENAME
   );
   return preferredEnc || data.files[0];
+}
+
+/**
+ * Ensures the encrypted `.vault.enc` file on Admin's Google Drive can be downloaded by fileId
+ * by family members who possess the customized invite link and AES-256-GCM decryption key.
+ */
+async function ensureEncryptedDriveFileSharedById(
+  accessToken: string,
+  fileId: string
+): Promise<void> {
+  try {
+    await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+        fileId
+      )}/permissions`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          role: 'reader',
+          type: 'anyone',
+          allowFileDiscovery: false,
+        }),
+      }
+    );
+  } catch {
+    // ignore if permission already exists
+  }
 }
 
 /**
@@ -311,12 +551,13 @@ export async function pushVaultStateToDriveAutoSync(params: {
   ).trim();
   if (!encryptionPassphrase) {
     throw new Error(
-      'Brak lokalnego klucza szyfrowania synchronizacji (syncEncryptionKey) z serwera.'
+      'Brak klucza szyfrowania synchronizacji (syncEncryptionKey).'
     );
   }
 
   const plainPayloadJson = JSON.stringify({
     ...params.state,
+    syncEncryptionKey: encryptionPassphrase,
     autoSyncedAt: new Date().toISOString(),
   });
 
@@ -331,6 +572,9 @@ export async function pushVaultStateToDriveAutoSync(params: {
     mimeType: 'application/octet-stream',
     description:
       'Stały zaszyfrowany plik automatycznej synchronizacji bazy FamilyStream Vault (AES-256-GCM Auto-Sync)',
+    appProperties: {
+      fsvSyncKey: encryptionPassphrase,
+    },
   };
 
   const boundary = '-------FamilyStreamVaultAutoSyncBoundary2026';
@@ -381,6 +625,9 @@ export async function pushVaultStateToDriveAutoSync(params: {
     name: string;
     modifiedTime: string;
   };
+
+  await ensureEncryptedDriveFileSharedById(params.accessToken, saved.id);
+
   return {
     fileId: saved.id,
     modifiedTime: saved.modifiedTime || new Date().toISOString(),
@@ -389,12 +636,18 @@ export async function pushVaultStateToDriveAutoSync(params: {
 
 /**
  * Pulls and decrypts the vault state from the single constant file
- * `FamilyStreamVault_AutoSync.vault.enc` on Google Drive (with automatic fallback for legacy plain JSON).
+ * `FamilyStreamVault_AutoSync.vault.enc` on Google Drive.
+ * Automatically uses `appProperties.fsvSyncKey` stored on the Drive file so an Admin
+ * logging into a fresh PWA on any phone/computer can immediately decrypt their existing Vault!
  */
 export async function pullVaultStateFromDriveAutoSync(
   accessToken: string,
   syncEncryptionKey?: string
-): Promise<{ fileId: string; state: ServerVaultState } | null> {
+): Promise<{
+  fileId: string;
+  syncEncryptionKey?: string;
+  state: ServerVaultState;
+} | null> {
   const existing = await findAutoSyncFileOnDrive(accessToken);
   if (!existing) {
     return null;
@@ -418,11 +671,15 @@ export async function pullVaultStateFromDriveAutoSync(
   const rawText = (await res.text()).trim();
   if (!rawText) return null;
 
+  const driveStoredKey = existing.appProperties?.fsvSyncKey;
+
   // Case 1: Encrypted AES-256-GCM envelope (`VAULT_BACKUP_V1:...`)
   if (rawText.startsWith('VAULT_BACKUP_V1:')) {
     const candidateKeys = Array.from(
       new Set(
-        [syncEncryptionKey].filter((k): k is string => Boolean(k && k.trim()))
+        [driveStoredKey, syncEncryptionKey].filter((k): k is string =>
+          Boolean(k && k.trim())
+        )
       )
     );
     let lastErr: Error | null = null;
@@ -432,6 +689,7 @@ export async function pullVaultStateFromDriveAutoSync(
         const parsed = JSON.parse(decryptedJson) as ServerVaultState;
         return {
           fileId: existing.id,
+          syncEncryptionKey: keyToTry,
           state: parsed,
         };
       } catch (err) {
@@ -449,12 +707,77 @@ export async function pullVaultStateFromDriveAutoSync(
     );
   }
 
-  // Case 2: Legacy plain JSON fallback (seamlessly upgrades on next save)
+  // Case 2: Legacy plain JSON fallback
   const parsed = JSON.parse(rawText) as ServerVaultState;
   return {
     fileId: existing.id,
+    syncEncryptionKey: driveStoredKey || syncEncryptionKey,
     state: parsed,
   };
+}
+
+/**
+ * Pulls and decrypts the shared Vault file from the Administrator's Google Drive
+ * for a Family Member opening a customized invitation link in their installed PWA.
+ */
+export async function pullSharedVaultStateFromAdminDriveForMember(params: {
+  driveFileId?: string;
+  syncEncryptionKey: string;
+  encryptedSnapshot?: string;
+}): Promise<ServerVaultState | null> {
+  const cleanKey = (params.syncEncryptionKey || '').trim();
+  if (!cleanKey) return null;
+
+  // 1. Try fetching the live shared encrypted file from Admin's Google Drive (via server proxy or direct token/CORS)
+  if (params.driveFileId) {
+    const endpointsToTry: Array<{ url: string; headers?: Record<string, string> }> = [
+      {
+        url: `/api/vault/drive-shared-file?fileId=${encodeURIComponent(
+          params.driveFileId
+        )}`,
+      },
+      ...(cachedAccessToken
+        ? [
+            {
+              url: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+                params.driveFileId
+              )}?alt=media`,
+              headers: { Authorization: `Bearer ${cachedAccessToken}` },
+            },
+          ]
+        : []),
+    ];
+
+    for (const ep of endpointsToTry) {
+      try {
+        const res = await fetch(ep.url, { headers: ep.headers });
+        if (res.ok) {
+          const text = (await res.text()).trim();
+          if (text.startsWith('VAULT_BACKUP_V1:')) {
+            const decryptedJson = await decryptVaultBackupFile(text, cleanKey);
+            return JSON.parse(decryptedJson) as ServerVaultState;
+          }
+        }
+      } catch {
+        // try next endpoint or snapshot fallback
+      }
+    }
+  }
+
+  // 2. Fallback to the encrypted snapshot embedded in the customized invite link
+  if (params.encryptedSnapshot) {
+    try {
+      const decryptedJson = await decryptVaultBackupFile(
+        params.encryptedSnapshot,
+        cleanKey
+      );
+      return JSON.parse(decryptedJson) as ServerVaultState;
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 /**
