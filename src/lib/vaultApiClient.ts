@@ -867,3 +867,18 @@ export async function pushProjectCodeToGitHubOnServer(params?: {
     body: JSON.stringify(params || {}),
   });
 }
+
+export async function checkGitHubPagesLiveStatus(url: string): Promise<{
+  live: boolean;
+  status: number;
+  url: string;
+  checkedAt?: string;
+}> {
+  return apiRequest<{
+    live: boolean;
+    status: number;
+    url: string;
+    checkedAt?: string;
+  }>(`/api/github/pages-status?url=${encodeURIComponent(url)}`);
+}
+

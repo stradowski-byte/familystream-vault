@@ -1717,6 +1717,45 @@ async function startServer() {
     }
   });
 
+  // 13D. CHECK LIVE GITHUB PAGES CDN STATUS (Prevents false 404 during 20-40s GitHub CDN propagation)
+  app.get('/api/github/pages-status', async (req, res) => {
+    const rawUrl =
+      typeof req.query.url === 'string' && req.query.url.trim()
+        ? req.query.url.trim()
+        : bootstrapMeta.githubConfig?.pagesUrl || '';
+
+    if (!rawUrl || !rawUrl.startsWith('https://')) {
+      res.json({ live: false, status: 0, url: rawUrl });
+      return;
+    }
+
+    try {
+      const separator = rawUrl.includes('?') ? '&' : '?';
+      const probeUrl = `${rawUrl}${separator}_cb=${Date.now()}`;
+      const pageRes = await fetch(probeUrl, {
+        method: 'GET',
+        headers: {
+          'User-Agent': 'FamilyStream-Vault-Pages-Probe',
+          'Cache-Control': 'no-cache, no-store, must-revalidate',
+          Pragma: 'no-cache',
+        },
+      });
+      res.json({
+        live: pageRes.ok,
+        status: pageRes.status,
+        url: rawUrl,
+        checkedAt: new Date().toISOString(),
+      });
+    } catch {
+      res.json({
+        live: false,
+        status: 0,
+        url: rawUrl,
+        checkedAt: new Date().toISOString(),
+      });
+    }
+  });
+
   // Serve a WebSocket-free /@vite/client module
   app.get('/@vite/client', (_req, res) => {
     res.type('application/javascript').send(`

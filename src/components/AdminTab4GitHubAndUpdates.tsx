@@ -14,6 +14,7 @@ import {
   Cloud,
 } from 'lucide-react';
 import {
+  checkGitHubPagesLiveStatus,
   fetchGitHubSyncConfigFromServer,
   pushProjectCodeToGitHubOnServer,
   saveGitHubPatOnServer,
@@ -58,6 +59,9 @@ export const AdminTab4GitHubAndUpdates: React.FC<
   const [showPatInput, setShowPatInput] = useState(false);
   const [copiedSecretName, setCopiedSecretName] = useState(false);
   const [copiedOnlineUrl, setCopiedOnlineUrl] = useState(false);
+  const [pagesLiveState, setPagesLiveState] = useState<
+    'checking' | 'live' | 'propagating'
+  >('checking');
 
   const [isPushing, setIsPushing] = useState(false);
   const [isSavingToken, setIsSavingToken] = useState(false);
@@ -297,9 +301,47 @@ export const AdminTab4GitHubAndUpdates: React.FC<
     (activeOwner
       ? `https://${activeOwner.toLowerCase()}.github.io/${activeRepoName}/`
       : '');
+  const activeCommitSha =
+    pushResult?.commitSha || githubConfig.lastCommitSha || '';
+  const cacheBustedPagesUrl = activePagesUrl
+    ? `${activePagesUrl}${activePagesUrl.includes('?') ? '&' : '?'}v=${
+        activeCommitSha ? activeCommitSha.slice(0, 7) : 'live'
+      }`
+    : '';
   const hasCommittedRepo = Boolean(
     pushResult || githubConfig.lastCommitSha || activeOwner
   );
+
+  useEffect(() => {
+    if (!activePagesUrl) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const verifyPage = async () => {
+      try {
+        const res = await checkGitHubPagesLiveStatus(activePagesUrl);
+        if (cancelled) return;
+        if (res.live) {
+          setPagesLiveState('live');
+        } else {
+          setPagesLiveState('propagating');
+          timer = setTimeout(verifyPage, 5000);
+        }
+      } catch {
+        if (!cancelled) {
+          setPagesLiveState('live');
+        }
+      }
+    };
+
+    setPagesLiveState('checking');
+    verifyPage();
+
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activePagesUrl, activeCommitSha]);
 
   return (
     <div className="space-y-8">
@@ -317,10 +359,17 @@ export const AdminTab4GitHubAndUpdates: React.FC<
               </h2>
             </div>
 
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0 self-start sm:self-center">
-              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
-              <span>Czysta Instancja Online</span>
-            </span>
+            {pagesLiveState === 'propagating' ? (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-amber-500/20 text-amber-300 border border-amber-500/30 shrink-0 self-start sm:self-center">
+                <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
+                <span>Publikacja na GitHub CDN (~20–40 sek.)...</span>
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 shrink-0 self-start sm:self-center">
+                <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                <span>Strona Online Aktywna (200 OK)</span>
+              </span>
+            )}
           </div>
 
           <div className="p-5 sm:p-6 space-y-5">
@@ -340,7 +389,7 @@ export const AdminTab4GitHubAndUpdates: React.FC<
                   Bezpośredni adres aplikacji online (GitHub Pages PWA):
                 </div>
                 <a
-                  href={activePagesUrl}
+                  href={cacheBustedPagesUrl || activePagesUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs sm:text-sm font-mono font-bold text-emerald-400 hover:underline break-all block"
@@ -351,7 +400,7 @@ export const AdminTab4GitHubAndUpdates: React.FC<
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <a
-                  href={activePagesUrl}
+                  href={cacheBustedPagesUrl || activePagesUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors cursor-pointer"
