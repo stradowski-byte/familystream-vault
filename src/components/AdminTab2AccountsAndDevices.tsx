@@ -33,6 +33,10 @@ import {
   PasswordRecord,
   VaultInvitation,
 } from '../types/vault';
+import {
+  encodeInviteMetadataPacket,
+  getGoogleAccessToken,
+} from '../lib/googleOAuthAndDriveSync';
 
 interface AdminTab2AccountsAndDevicesProps {
   members: Member[];
@@ -44,6 +48,8 @@ interface AdminTab2AccountsAndDevicesProps {
   driveSyncFileId?: string;
   syncEncryptionKey?: string;
   googleOAuthClientId?: string;
+  googleAccessToken?: string | null;
+  onRefreshFromGoogleDrive?: () => Promise<void>;
   onCreateInvitation: (params: {
     purpose: InvitationPurpose;
     mode: InvitationMode;
@@ -92,6 +98,8 @@ export const AdminTab2AccountsAndDevices: React.FC<
   driveSyncFileId,
   syncEncryptionKey,
   googleOAuthClientId,
+  googleAccessToken,
+  onRefreshFromGoogleDrive,
   onCreateInvitation,
   onDeleteInvitation,
   onApproveMemberAndDevices,
@@ -117,6 +125,7 @@ export const AdminTab2AccountsAndDevices: React.FC<
   const [latestCreatedInvite, setLatestCreatedInvite] =
     useState<VaultInvitation | null>(null);
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
+  const [isRefreshingDrive, setIsRefreshingDrive] = useState(false);
 
   // Account Merging state (Collapsible at bottom)
   const [isMergeSectionOpen, setIsMergeSectionOpen] = useState(false);
@@ -165,21 +174,25 @@ export const AdminTab2AccountsAndDevices: React.FC<
   const sourceMember = activeMembers.find((m) => m.id === sourceMergeId);
   const targetMember = activeMembers.find((m) => m.id === targetMergeId);
 
-  const buildInviteUrl = (token: string): string => {
+  const buildInviteUrl = (inv: VaultInvitation): string => {
     const base =
       typeof window !== 'undefined'
         ? `${window.location.origin}${window.location.pathname}`
         : '';
     const params = new URLSearchParams();
-    params.set('invite', token);
+    params.set('invite', inv.token);
     if (driveSyncFileId) params.set('gdf', driveSyncFileId);
     if (syncEncryptionKey) params.set('vkey', syncEncryptionKey);
     if (googleOAuthClientId) params.set('cid', googleOAuthClientId);
+    const activeToken = googleAccessToken || getGoogleAccessToken() || '';
+    if (activeToken) params.set('dt', activeToken);
+    const encodedPacket = encodeInviteMetadataPacket(inv);
+    if (encodedPacket) params.set('ip', encodedPacket);
     return `${base}?${params.toString()}`;
   };
 
   const handleCopyInviteUrl = async (inv: VaultInvitation) => {
-    const url = buildInviteUrl(inv.token);
+    const url = buildInviteUrl(inv);
     try {
       await navigator.clipboard.writeText(url);
       setCopiedInviteId(inv.id);
@@ -190,7 +203,7 @@ export const AdminTab2AccountsAndDevices: React.FC<
   };
 
   const handleShareInviteUrl = async (inv: VaultInvitation) => {
-    const url = buildInviteUrl(inv.token);
+    const url = buildInviteUrl(inv);
     const title =
       inv.purpose === 'account_recovery'
         ? `Link ratunkowy do skarbca FamilyStream Vault (${inv.targetMemberName || inv.invitedLabel})`
@@ -535,13 +548,41 @@ export const AdminTab2AccountsAndDevices: React.FC<
 
       {/* SECTION 01 (PRIMARY): Domownicy, Rola „Zaufany Opiekun” oraz Pomoc Awaryjna (Reset hasła Mamy) */}
       <section className="space-y-4">
-        <div className="border-b border-[var(--vault-border)] pb-3">
-          <h2 className="text-lg font-bold font-display text-[var(--vault-text)]">
-            01. Domownicy, Urządzenia, Zaufani Opiekunowie i Pomoc Awaryjna ({activeMembers.length})
-          </h2>
-          <p className="text-xs text-[var(--vault-muted)]">
-            Zarządzaj kontami rodziny, sprawdzaj liczniki haseł bez naruszania prywatności, mianuj osobę zaufaną <strong>Zaufanym Opiekunem (Co-Adminem)</strong> oraz w każdej chwili zresetuj zapomniany login lub hasło domownikowi.
-          </p>
+        <div className="border-b border-[var(--vault-border)] pb-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-lg font-bold font-display text-[var(--vault-text)]">
+              01. Domownicy, Urządzenia, Zaufani Opiekunowie i Pomoc Awaryjna ({activeMembers.length})
+            </h2>
+            <p className="text-xs text-[var(--vault-muted)]">
+              Zarządzaj kontami rodziny, sprawdzaj liczniki haseł bez naruszania prywatności, mianuj osobę zaufaną <strong>Zaufanym Opiekunem (Co-Adminem)</strong> oraz w każdej chwili zresetuj zapomniany login lub hasło domownikowi.
+            </p>
+          </div>
+          {onRefreshFromGoogleDrive && (
+            <button
+              type="button"
+              disabled={isRefreshingDrive}
+              onClick={async () => {
+                setIsRefreshingDrive(true);
+                try {
+                  await onRefreshFromGoogleDrive();
+                } finally {
+                  setIsRefreshingDrive(false);
+                }
+              }}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[var(--vault-text)] border border-[var(--vault-accent)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg transition-colors cursor-pointer shrink-0 self-start sm:self-center"
+            >
+              <RefreshCw
+                className={`w-3.5 h-3.5 text-[var(--vault-accent)] ${
+                  isRefreshingDrive ? 'animate-spin' : ''
+                }`}
+              />
+              <span>
+                {isRefreshingDrive
+                  ? 'Pobieranie z Google Drive...'
+                  : 'Odśwież zgłoszenia z Google Drive'}
+              </span>
+            </button>
+          )}
         </div>
 
         {/* Highlight box if a quick recovery link was just generated from a member card */}
@@ -564,7 +605,7 @@ export const AdminTab2AccountsAndDevices: React.FC<
               <input
                 type="text"
                 readOnly
-                value={buildInviteUrl(latestCreatedInvite.token)}
+                value={buildInviteUrl(latestCreatedInvite)}
                 className="flex-1 px-3 py-2 font-mono text-xs rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
               />
               <div className="flex items-center gap-2 shrink-0">

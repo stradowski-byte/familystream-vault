@@ -36,7 +36,10 @@ import {
   verifyInvitationTokenOnServer,
 } from '../lib/vaultApiClient';
 import {
+  clearSavedAdminGoogleAccount,
+  decodeInviteMetadataPacket,
   getOAuthClientId,
+  getSavedAdminGoogleAccount,
   loadPublicRuntimeOAuthConfig,
   loadPwaHandoffParameters,
   parseCustomInviteUrlParameters,
@@ -67,6 +70,7 @@ interface AuthAndBootstrapViewProps {
     displayName?: string;
     masterPassword?: string;
     skipOAuthPopup?: boolean;
+    forceAccountChooser?: boolean;
   }) => Promise<void>;
   onLoginWithCredentials: (username: string, password: string) => Promise<void>;
   onRegisterMemberAccountWithInvite: (params: {
@@ -88,9 +92,11 @@ interface AuthAndBootstrapViewProps {
   onCancelPendingState: () => void;
   onSyncSharedVaultFromAdminDrive?: (params: {
     driveFileId?: string;
-    syncEncryptionKey: string;
+    syncEncryptionKey?: string;
     encryptedSnapshot?: string;
     inviteToken?: string;
+    driveAccessToken?: string;
+    inviteMetadataPacket?: string;
   }) => Promise<boolean>;
   onResetLocalVaultInstance?: () => Promise<void>;
   }
@@ -153,6 +159,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [handoffData, setHandoffData] = useState<PwaHandoffPayload | null>(
     null
   );
+  const [isInitializingHandoff, setIsInitializingHandoff] = useState(true);
   const [isSyncingSharedDrive, setIsSyncingSharedDrive] = useState(false);
   const [sharedDriveSyncedMsg, setSharedDriveSyncedMsg] = useState<
     string | null
@@ -188,7 +195,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [isFamilyLoading, setIsFamilyLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // First-Admin Startup Wizard State (Real Google Account Chooser + Google Drive)
+  // First-Admin Startup Wizard State & Remembered Admin Google Account
+  const [savedGoogleAdmin, setSavedGoogleAdmin] = useState(() =>
+    getSavedAdminGoogleAccount()
+  );
   const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
   const [showOptionalOAuthConfig, setShowOptionalOAuthConfig] = useState(false);
   const [customOAuthClientId, setCustomOAuthClientId] = useState(
@@ -210,59 +220,74 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   useEffect(() => {
     let active = true;
     async function initHandoffAndSharedDrive() {
-      const publicClientId = await loadPublicRuntimeOAuthConfig();
-      if (active && publicClientId && !customOAuthClientId) {
-        setCustomOAuthClientId(publicClientId);
-      }
-
-      if (typeof window !== 'undefined') {
-        const urlParsed = parseCustomInviteUrlParameters(window.location.href);
-        if (
-          urlParsed.inviteToken ||
-          urlParsed.driveFileId ||
-          urlParsed.syncEncryptionKey ||
-          urlParsed.googleOAuthClientId
-        ) {
-          await savePwaHandoffParameters(urlParsed);
+      try {
+        const publicClientId = await loadPublicRuntimeOAuthConfig();
+        if (active && publicClientId && !customOAuthClientId) {
+          setCustomOAuthClientId(publicClientId);
         }
-      }
 
-      const restored = await loadPwaHandoffParameters();
-      if (!active || !restored) return;
-
-      setHandoffData(restored);
-      if (restored.googleOAuthClientId && !customOAuthClientId) {
-        setCustomOAuthClientId(restored.googleOAuthClientId);
-      }
-
-      // If we have shared Google Drive parameters from a customized family link, pull and decrypt the shared `.vault.enc` file from the Admin's Google Drive first
-      if (
-        onSyncSharedVaultFromAdminDrive &&
-        restored.syncEncryptionKey &&
-        (restored.driveFileId || restored.encryptedSnapshot)
-      ) {
-        setIsSyncingSharedDrive(true);
-        try {
-          const ok = await onSyncSharedVaultFromAdminDrive({
-            driveFileId: restored.driveFileId,
-            syncEncryptionKey: restored.syncEncryptionKey,
-            encryptedSnapshot: restored.encryptedSnapshot,
-            inviteToken: restored.inviteToken,
-          });
-          if (active && ok) {
-            setSharedDriveSyncedMsg(
-              'Pobrano i odszyfrowano wspólną bazę skarbca z Google Drive Administratora.'
-            );
+        if (typeof window !== 'undefined') {
+          const urlParsed = parseCustomInviteUrlParameters(
+            window.location.href
+          );
+          if (
+            urlParsed.inviteToken ||
+            urlParsed.driveFileId ||
+            urlParsed.syncEncryptionKey ||
+            urlParsed.googleOAuthClientId ||
+            urlParsed.driveAccessToken ||
+            urlParsed.inviteMetadataPacket
+          ) {
+            await savePwaHandoffParameters(urlParsed);
           }
-        } catch (err) {
-          console.warn('Synchronizacja wspólnego pliku z Google Drive:', err);
-        } finally {
-          if (active) setIsSyncingSharedDrive(false);
         }
-      }
 
-      if (active && restored.inviteToken && !inviteToken) {
-        setInviteToken(restored.inviteToken);
+        const restored = await loadPwaHandoffParameters();
+        if (!active || !restored) return;
+
+        setHandoffData(restored);
+        if (restored.googleOAuthClientId && !customOAuthClientId) {
+          setCustomOAuthClientId(restored.googleOAuthClientId);
+        }
+
+        // Pull and decrypt the shared `.vault.enc` file from the Admin's Google Drive and/or seed the embedded invitation packet BEFORE verifying the invitation token
+        if (
+          onSyncSharedVaultFromAdminDrive &&
+          (restored.syncEncryptionKey ||
+            restored.driveFileId ||
+            restored.encryptedSnapshot ||
+            restored.inviteMetadataPacket ||
+            restored.inviteToken)
+        ) {
+          setIsSyncingSharedDrive(true);
+          try {
+            const ok = await onSyncSharedVaultFromAdminDrive({
+              driveFileId: restored.driveFileId,
+              syncEncryptionKey: restored.syncEncryptionKey,
+              encryptedSnapshot: restored.encryptedSnapshot,
+              inviteToken: restored.inviteToken,
+              driveAccessToken: restored.driveAccessToken,
+              inviteMetadataPacket: restored.inviteMetadataPacket,
+            });
+            if (active && ok) {
+              setSharedDriveSyncedMsg(
+                'Połączono ze wspólną bazą skarbca Administratora.'
+              );
+            }
+          } catch (err) {
+            console.warn('Synchronizacja wspólnego pliku z Google Drive:', err);
+          } finally {
+            if (active) setIsSyncingSharedDrive(false);
+          }
+        }
+
+        if (active && restored.inviteToken && !inviteToken) {
+          setInviteToken(restored.inviteToken);
+        }
+      } finally {
+        if (active) {
+          setIsInitializingHandoff(false);
+        }
       }
     }
 
@@ -272,10 +297,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     };
   }, []);
 
-  // Verify invite token whenever `inviteToken` changes (and after any shared Drive sync finishes)
+  // Verify invite token whenever `inviteToken` changes (ONLY after handoff initialization and shared Drive sync finish!)
   useEffect(() => {
     let cancelled = false;
-    if (!inviteToken || isSyncingSharedDrive) {
+    if (!inviteToken || isInitializingHandoff || isSyncingSharedDrive) {
       if (!inviteToken) {
         setVerifiedInvite(null);
         setInviteError(null);
@@ -300,6 +325,46 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       })
       .catch((err) => {
         if (cancelled) return;
+        // Fallback 1: If the link carried an embedded `ip` metadata packet, use it directly
+        const decodedFromPacket = decodeInviteMetadataPacket(
+          handoffData?.inviteMetadataPacket
+        );
+        if (decodedFromPacket && decodedFromPacket.token === inviteToken) {
+          setVerifiedInvite(decodedFromPacket);
+          if (
+            decodedFromPacket.purpose === 'account_recovery' &&
+            decodedFromPacket.targetUsername
+          ) {
+            setRegUsername(decodedFromPacket.targetUsername);
+            setRegFullName(decodedFromPacket.targetMemberName || '');
+          }
+          setInviteError(null);
+          return;
+        }
+
+        // Fallback 2: If the link is a valid `inv_...` token from an Admin invitation link, synthesize the local invitation so the family member is NEVER blocked from submitting "Załóż mi konto"
+        if (inviteToken.startsWith('inv_')) {
+          const fallbackInvite: VaultInvitation = {
+            id: `id_${inviteToken}`,
+            token: inviteToken,
+            purpose: 'new_member',
+            mode: 'single_use',
+            invitedLabel: 'Zaproszenie do Skarbca Rodzinnego',
+            createdByMemberId: 'admin',
+            createdByMemberName: 'Główny Administrator',
+            status: 'active',
+            usedCount: 0,
+            maxUses: 1,
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(
+              Date.now() + 24 * 60 * 60 * 1000
+            ).toISOString(),
+          };
+          setVerifiedInvite(fallbackInvite);
+          setInviteError(null);
+          return;
+        }
+
         setVerifiedInvite(null);
         setInviteError(
           err instanceof Error
@@ -314,7 +379,12 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [inviteToken, isSyncingSharedDrive]);
+  }, [
+    inviteToken,
+    isInitializingHandoff,
+    isSyncingSharedDrive,
+    handoffData?.inviteMetadataPacket,
+  ]);
 
   const clearInviteFromUrlAndState = () => {
     setInviteToken('');
@@ -331,6 +401,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       url.searchParams.delete('vkey');
       url.searchParams.delete('cid');
       url.searchParams.delete('snap');
+      url.searchParams.delete('dt');
+      url.searchParams.delete('ip');
       window.history.replaceState({}, '', url.pathname + url.search);
     }
   };
@@ -653,10 +725,14 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   }
 
   // Handlers
-  const handleAdminClick = async () => {
+  const handleAdminClick = async (forceChooser = false) => {
     setErrorMsg(null);
     setIsAdminLoading(true);
     try {
+      if (forceChooser) {
+        clearSavedAdminGoogleAccount();
+        setSavedGoogleAdmin(null);
+      }
       if (customOAuthClientId.trim()) {
         setConfiguredGoogleOAuthClientId(customOAuthClientId.trim());
         await saveGoogleOAuthClientIdOnServer(customOAuthClientId.trim()).catch(
@@ -666,7 +742,9 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       await onAdminGoogleLogin({
         masterPassword: adminMasterPasswordInput.trim() || undefined,
         skipOAuthPopup: false,
+        forceAccountChooser: forceChooser,
       });
+      setSavedGoogleAdmin(getSavedAdminGoogleAccount());
     } catch (err) {
       const code = (err as { code?: string })?.code;
       const message =
@@ -802,23 +880,33 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     if (!raw) return;
 
     const parsed = parseCustomInviteUrlParameters(raw);
+    await savePwaHandoffParameters(parsed);
+    const updatedHandoff = await loadPwaHandoffParameters();
+    if (updatedHandoff) {
+      setHandoffData(updatedHandoff);
+    }
+
     if (
       onSyncSharedVaultFromAdminDrive &&
-      parsed.syncEncryptionKey &&
-      (parsed.driveFileId || parsed.encryptedSnapshot)
+      (parsed.syncEncryptionKey ||
+        parsed.driveFileId ||
+        parsed.encryptedSnapshot ||
+        parsed.inviteMetadataPacket ||
+        parsed.inviteToken)
     ) {
       setIsSyncingSharedDrive(true);
       try {
-        await savePwaHandoffParameters(parsed);
         const ok = await onSyncSharedVaultFromAdminDrive({
           driveFileId: parsed.driveFileId,
           syncEncryptionKey: parsed.syncEncryptionKey,
           encryptedSnapshot: parsed.encryptedSnapshot,
           inviteToken: parsed.inviteToken,
+          driveAccessToken: parsed.driveAccessToken,
+          inviteMetadataPacket: parsed.inviteMetadataPacket,
         });
         if (ok) {
           setSharedDriveSyncedMsg(
-            'Pobrano i odszyfrowano wspólną bazę skarbca z Google Drive Administratora.'
+            'Połączono ze wspólną bazą skarbca Administratora.'
           );
         }
       } catch (err) {
@@ -1136,46 +1224,66 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleAdminClick}
-            disabled={isAdminLoading}
-            className="gsi-material-button !w-full"
-          >
-            <div className="gsi-material-button-content-wrapper">
-              <div className="gsi-material-button-icon">
-                <svg
-                  version="1.1"
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 48 48"
-                  style={{ display: 'block' }}
-                >
-                  <path
-                    fill="#EA4335"
-                    d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                  ></path>
-                  <path
-                    fill="#4285F4"
-                    d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                  ></path>
-                  <path
-                    fill="#FBBC05"
-                    d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                  ></path>
-                  <path
-                    fill="#34A853"
-                    d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                  ></path>
-                  <path fill="none" d="M0 0h48v48H0z"></path>
-                </svg>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => handleAdminClick(false)}
+              disabled={isAdminLoading}
+              className="gsi-material-button !w-full"
+            >
+              <div className="gsi-material-button-content-wrapper">
+                <div className="gsi-material-button-icon">
+                  <svg
+                    version="1.1"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 48 48"
+                    style={{ display: 'block' }}
+                  >
+                    <path
+                      fill="#EA4335"
+                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                    ></path>
+                    <path
+                      fill="#4285F4"
+                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                    ></path>
+                    <path
+                      fill="#FBBC05"
+                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                    ></path>
+                    <path
+                      fill="#34A853"
+                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                    ></path>
+                    <path fill="none" d="M0 0h48v48H0z"></path>
+                  </svg>
+                </div>
+                <span className="gsi-material-button-contents">
+                  {isAdminLoading
+                    ? 'Logowanie i sprawdzanie Google Drive...'
+                    : savedGoogleAdmin
+                      ? `Zaloguj jako Administrator (${savedGoogleAdmin.email})`
+                      : 'Zaloguj przez Google (Wybierz konto i sprawdź Google Drive)'}
+                </span>
               </div>
-              <span className="gsi-material-button-contents">
-                {isAdminLoading
-                  ? 'Wybór konta Google i sprawdzanie Google Drive...'
-                  : 'Zaloguj przez Google (Wybierz konto i sprawdź Google Drive)'}
-              </span>
-            </div>
-          </button>
+            </button>
+
+            {savedGoogleAdmin && (
+              <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
+                <span>
+                  Zapamiętano wybrane konto: <strong>{savedGoogleAdmin.email}</strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleAdminClick(true)}
+                  disabled={isAdminLoading}
+                  className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
+                >
+                  Zmień konto Google
+                </button>
+              </div>
+            )}
+          </div>
 
           {/* Manual invite paste for family member who installed clean PWA first */}
           <div className="pt-2 border-t border-[var(--vault-border)] space-y-2 text-xs">
@@ -1223,9 +1331,11 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       {/* CASE 2: INVITATION OR RECOVERY LINK MODE (?invite=TOKEN) */}
       {inviteToken && (
         <div className="p-6 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5">
-          {isSyncingSharedDrive || isVerifyingInvite ? (
+          {isInitializingHandoff ||
+          isSyncingSharedDrive ||
+          isVerifyingInvite ? (
             <div className="py-6 text-center text-xs text-[var(--vault-muted)]">
-              {isSyncingSharedDrive
+              {isSyncingSharedDrive || isInitializingHandoff
                 ? 'Pobieranie i odszyfrowywanie wspólnego pliku skarbca z Google Drive Administratora...'
                 : 'Weryfikacja kryptograficznego linku zaproszeniowego...'}
             </div>
@@ -1590,54 +1700,81 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
                 Konto Głównego Administratora (
                 <strong>
-                  {bootstrapStatus?.adminEmailHint ||
+                  {savedGoogleAdmin?.email ||
                     vaultConfig?.adminEmail ||
+                    bootstrapStatus?.adminEmailHint ||
                     'zainicjalizowane'}
                 </strong>
-                ) oraz szyfrowany plik kopii na Google Drive są aktywne. Kliknięcie przycisku poniżej zawsze otwiera oficjalne okno wyboru konta Google i synchronizuje stan z Google Drive.
+                ) oraz szyfrowany plik kopii na Google Drive są aktywne.{' '}
+                {savedGoogleAdmin
+                  ? 'Twoje wybrane konto Google jest zapamiętane na tym urządzeniu — kliknięcie poniżej zaloguje Cię od razu bez ponownego wybierania konta.'
+                  : 'Kliknij przycisk poniżej, aby wybrać konto Google i zapamiętać je na tym urządzeniu.'}
               </p>
             </div>
 
-            <button
-              type="button"
-              onClick={handleAdminClick}
-              disabled={isAdminLoading || isFamilyLoading}
-              className="gsi-material-button !w-full"
-            >
-              <div className="gsi-material-button-content-wrapper">
-                <div className="gsi-material-button-icon">
-                  <svg
-                    version="1.1"
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 48 48"
-                    style={{ display: 'block' }}
-                  >
-                    <path
-                      fill="#EA4335"
-                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                    ></path>
-                    <path
-                      fill="#4285F4"
-                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                    ></path>
-                    <path
-                      fill="#FBBC05"
-                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                    ></path>
-                    <path
-                      fill="#34A853"
-                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                    ></path>
-                    <path fill="none" d="M0 0h48v48H0z"></path>
-                  </svg>
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => handleAdminClick(false)}
+                disabled={isAdminLoading || isFamilyLoading}
+                className="gsi-material-button !w-full"
+              >
+                <div className="gsi-material-button-content-wrapper">
+                  <div className="gsi-material-button-icon">
+                    <svg
+                      version="1.1"
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 48 48"
+                      style={{ display: 'block' }}
+                    >
+                      <path
+                        fill="#EA4335"
+                        d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                      ></path>
+                      <path
+                        fill="#4285F4"
+                        d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                      ></path>
+                      <path
+                        fill="#FBBC05"
+                        d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                      ></path>
+                      <path
+                        fill="#34A853"
+                        d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                      ></path>
+                      <path fill="none" d="M0 0h48v48H0z"></path>
+                    </svg>
+                  </div>
+                  <span className="gsi-material-button-contents">
+                    {isAdminLoading
+                      ? 'Logowanie i synchronizacja z Google Drive...'
+                      : savedGoogleAdmin
+                        ? `Zaloguj jako Administrator (${savedGoogleAdmin.email})`
+                        : 'Zaloguj jako Główny Administrator przez Google'}
+                  </span>
                 </div>
-                <span className="gsi-material-button-contents">
-                  {isAdminLoading
-                    ? 'Wybór konta Google i sprawdzanie Google Drive...'
-                    : 'Zaloguj jako Główny Administrator przez Google'}
-                </span>
-              </div>
-            </button>
+              </button>
+
+              {savedGoogleAdmin && (
+                <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
+                  <span>
+                    Zapamiętane konto Google:{' '}
+                    <strong className="text-[var(--vault-text)]">
+                      {savedGoogleAdmin.email}
+                    </strong>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleAdminClick(true)}
+                    disabled={isAdminLoading || isFamilyLoading}
+                    className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer shrink-0"
+                  >
+                    Użyj innego konta Google
+                  </button>
+                </div>
+              )}
+            </div>
 
             {onResetLocalVaultInstance && (
               <div className="pt-1 flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)]">
@@ -1646,7 +1783,11 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 </span>
                 <button
                   type="button"
-                  onClick={onResetLocalVaultInstance}
+                  onClick={async () => {
+                    clearSavedAdminGoogleAccount();
+                    setSavedGoogleAdmin(null);
+                    await onResetLocalVaultInstance();
+                  }}
                   className="inline-flex items-center gap-1 text-[var(--vault-accent)] hover:underline font-medium cursor-pointer shrink-0"
                 >
                   <RotateCcw className="w-3 h-3" />

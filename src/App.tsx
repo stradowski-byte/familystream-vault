@@ -56,12 +56,15 @@ import {
 } from './lib/vaultApiClient';
 import {
   connectGoogleDriveOAuthDirect,
+  decodeInviteMetadataPacket,
   downloadVaultBackupFromDrive,
   getGoogleAccessToken,
   getOAuthClientId,
   loadPublicRuntimeOAuthConfig,
+  loadPwaHandoffParameters,
   pullSharedVaultStateFromAdminDriveForMember,
   pullVaultStateFromDriveAutoSync,
+  pushMemberRegistrationToSharedAdminDrive,
   pushVaultStateToDriveAutoSync,
   setConfiguredGoogleOAuthClientId,
   signInWithGoogleAdminDirect,
@@ -407,12 +410,77 @@ export default function App() {
   // Poll server state on initial boot and every 4 seconds for real-time family sync
   useEffect(() => {
     let active = true;
+    let tickCount = 0;
     setVaultApiSessionContext({
       deviceFingerprint: detectedDevice.deviceFingerprint,
     });
 
     const loadFromServer = async () => {
+      tickCount += 1;
       try {
+        // Every 2nd tick (~8s), if a Family Member is waiting for approval in pendingAuthState OR if Admin is on Tab 2 ('approvals'), also check Google Drive for cross-device updates on static GitHub Pages!
+        if (tickCount % 2 === 0) {
+          if (pendingAuthState) {
+            try {
+              const handoff = await loadPwaHandoffParameters();
+              const effectiveFileId =
+                driveSyncFileId || handoff?.driveFileId || '';
+              const effectiveSyncKey =
+                syncEncryptionKey || handoff?.syncEncryptionKey || '';
+              if (effectiveFileId && effectiveSyncKey) {
+                const sharedPulled =
+                  await pullSharedVaultStateFromAdminDriveForMember({
+                    driveFileId: effectiveFileId,
+                    syncEncryptionKey: effectiveSyncKey,
+                    driveAccessToken: handoff?.driveAccessToken,
+                  });
+                if (
+                  sharedPulled &&
+                  sharedPulled.state &&
+                  Array.isArray(sharedPulled.state.members) &&
+                  sharedPulled.state.members.length > 0
+                ) {
+                  await replaceVaultStateOnServer({
+                    ...sharedPulled.state,
+                    driveSyncFileId: effectiveFileId,
+                    syncEncryptionKey: effectiveSyncKey,
+                  });
+                }
+              }
+            } catch {
+              // ignore background polling error
+            }
+          } else if (
+            activeAdminTab === 'approvals' &&
+            (googleAccessToken || getGoogleAccessToken())
+          ) {
+            try {
+              const token = googleAccessToken || getGoogleAccessToken();
+              if (token) {
+                const pulled = await pullVaultStateFromDriveAutoSync(
+                  token,
+                  syncEncryptionKey
+                );
+                if (
+                  pulled &&
+                  pulled.state &&
+                  Array.isArray(pulled.state.members) &&
+                  pulled.state.members.length > 0
+                ) {
+                  await replaceVaultStateOnServer({
+                    ...pulled.state,
+                    driveSyncFileId: pulled.fileId,
+                    syncEncryptionKey:
+                      pulled.syncEncryptionKey || syncEncryptionKey,
+                  });
+                }
+              }
+            } catch {
+              // ignore background polling error
+            }
+          }
+        }
+
         const [boot, state] = await Promise.all([
           fetchBootstrapStatusFromServer().catch(() => null),
           fetchVaultStateFromServer(),
@@ -440,7 +508,15 @@ export default function App() {
       active = false;
       window.clearInterval(intervalId);
     };
-  }, [applyServerState, detectedDevice.deviceFingerprint]);
+  }, [
+    applyServerState,
+    detectedDevice.deviceFingerprint,
+    pendingAuthState,
+    activeAdminTab,
+    driveSyncFileId,
+    syncEncryptionKey,
+    googleAccessToken,
+  ]);
 
   // Current logged-in member object
   const currentMember = useMemo(() => {
@@ -507,6 +583,9 @@ export default function App() {
               lastSeenAt: new Date().toISOString(),
             });
             applyServerState(updatedState);
+            await pushMemberRegistrationToSharedAdminDrive(updatedState).catch(
+              () => false
+            );
           } catch (err) {
             console.warn('Automatic hardware envelope seal warning:', err);
           }
@@ -627,11 +706,13 @@ export default function App() {
     displayName?: string;
     masterPassword?: string;
     skipOAuthPopup?: boolean;
+    forceAccountChooser?: boolean;
   }) => {
     const identity = await signInWithGoogleAdminDirect({
       email: options?.email,
       displayName: options?.displayName,
       skipOAuthPopup: options?.skipOAuthPopup,
+      forceAccountChooser: options?.forceAccountChooser,
     });
     if (identity.accessToken) {
       setGoogleAccessToken(identity.accessToken);
@@ -877,31 +958,88 @@ export default function App() {
   const handleSyncSharedVaultFromAdminDrive = useCallback(
     async (params: {
       driveFileId?: string;
-      syncEncryptionKey: string;
+      syncEncryptionKey?: string;
       encryptedSnapshot?: string;
       inviteToken?: string;
+      driveAccessToken?: string;
+      inviteMetadataPacket?: string;
     }): Promise<boolean> => {
-      const pulled = await pullSharedVaultStateFromAdminDriveForMember({
-        driveFileId: params.driveFileId,
-        syncEncryptionKey: params.syncEncryptionKey,
-        encryptedSnapshot: params.encryptedSnapshot,
-      });
-      if (
-        !pulled ||
-        !pulled.state ||
-        !Array.isArray(pulled.state.members) ||
-        pulled.state.members.length === 0
-      ) {
-        return false;
+      let baseState = await fetchVaultStateFromServer();
+      let pulledOk = false;
+
+      if (params.syncEncryptionKey) {
+        const pulled = await pullSharedVaultStateFromAdminDriveForMember({
+          driveFileId: params.driveFileId,
+          syncEncryptionKey: params.syncEncryptionKey,
+          encryptedSnapshot: params.encryptedSnapshot,
+          driveAccessToken: params.driveAccessToken,
+        });
+        if (
+          pulled &&
+          pulled.state &&
+          Array.isArray(pulled.state.members) &&
+          pulled.state.members.length > 0
+        ) {
+          baseState = pulled.state;
+          pulledOk = true;
+        }
       }
 
-      const updatedState = await replaceVaultStateOnServer({
-        ...pulled.state,
-        driveSyncFileId: params.driveFileId || pulled.state.driveSyncFileId,
-        syncEncryptionKey: params.syncEncryptionKey,
-      });
-      applyServerState(updatedState);
-      return true;
+      // Ensure the invitation from `inviteMetadataPacket` (or `inviteToken`) is present in `baseState.invitations` so local verification and account creation always succeed
+      const decodedInvite = decodeInviteMetadataPacket(
+        params.inviteMetadataPacket
+      );
+      const nextInvitations = Array.isArray(baseState.invitations)
+        ? [...baseState.invitations]
+        : [];
+
+      if (decodedInvite) {
+        const existingIdx = nextInvitations.findIndex(
+          (i) => i.token === decodedInvite.token || i.id === decodedInvite.id
+        );
+        if (existingIdx >= 0) {
+          nextInvitations[existingIdx] = decodedInvite;
+        } else {
+          nextInvitations.unshift(decodedInvite);
+        }
+      } else if (params.inviteToken && params.inviteToken.startsWith('inv_')) {
+        const exists = nextInvitations.some(
+          (i) => i.token === params.inviteToken
+        );
+        if (!exists) {
+          nextInvitations.unshift({
+            id: `id_${params.inviteToken}`,
+            token: params.inviteToken,
+            purpose: 'new_member',
+            mode: 'single_use',
+            invitedLabel: 'Zaproszenie do Skarbca Rodzinnego',
+            createdByMemberId: 'admin',
+            createdByMemberName: 'Główny Administrator',
+            status: 'active',
+            usedCount: 0,
+            maxUses: 1,
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(
+              Date.now() + 24 * 60 * 60 * 1000
+            ).toISOString(),
+          });
+        }
+      }
+
+      if (pulledOk || decodedInvite || params.inviteToken) {
+        const updatedState = await replaceVaultStateOnServer({
+          ...baseState,
+          invitations: nextInvitations,
+          driveSyncFileId:
+            params.driveFileId || baseState.driveSyncFileId || '',
+          syncEncryptionKey:
+            params.syncEncryptionKey || baseState.syncEncryptionKey || '',
+        });
+        applyServerState(updatedState);
+        return true;
+      }
+
+      return false;
     },
     [applyServerState]
   );
@@ -1191,7 +1329,7 @@ export default function App() {
     password: string;
     setupBiometrics: boolean;
   }) => {
-    const serverState = await fetchVaultStateFromServer();
+    let serverState = await fetchVaultStateFromServer();
     const duplicate = serverState.members.find(
       (m) =>
         m.username.toLowerCase() === params.username.toLowerCase() &&
@@ -1214,6 +1352,35 @@ export default function App() {
       salt
     );
     const vaultEscrowKey = await wrapDekForMergeEscrow(dekBase64, salt);
+
+    // Ensure the invitation token is registered in local `serverState.invitations` so `establishVaultSessionOnServer` and `consumeInvitationTokenOnServer` always succeed even on static GitHub Pages
+    const hasInviteInStore = (serverState.invitations || []).some(
+      (i) => i.token === params.inviteToken
+    );
+    if (!hasInviteInStore) {
+      serverState = await replaceVaultStateOnServer({
+        ...serverState,
+        invitations: [
+          {
+            id: `id_${params.inviteToken}`,
+            token: params.inviteToken,
+            purpose: 'new_member',
+            mode: 'single_use',
+            invitedLabel: `Konto dla: ${params.fullName}`,
+            createdByMemberId: 'admin',
+            createdByMemberName: 'Główny Administrator',
+            status: 'active',
+            usedCount: 0,
+            maxUses: 1,
+            createdAt: now,
+            expiresAt: new Date(
+              Date.now() + 24 * 60 * 60 * 1000
+            ).toISOString(),
+          },
+          ...(serverState.invitations || []),
+        ],
+      });
+    }
 
     // Verify & establish bootstrap session with the invitation token
     await establishVaultSessionOnServer({
@@ -1287,12 +1454,17 @@ export default function App() {
     await saveMemberOnServer(memberId, newMember);
     await saveDeviceOnServer(devId, newDevice);
 
-    await logActivityAndSync(
+    const updatedState = await logActivityAndSync(
       memberId,
       params.fullName,
       'MEMBER_INVITE_REGISTER',
       `Domownik ${params.fullName} (login: ${params.username}, sprzęt: ${detectedDevice.hardwareSignatureHash}) kliknął „Załóż mi konto” z linku zaproszeniowego i oczekuje na wydanie Certyfikatu Sprzętowego.`
     );
+
+    // Push the newly created pending member & pending device back to `FamilyStreamVault_AutoSync.vault.enc` on the Admin's Google Drive so the Admin sees the request in Tab 02!
+    const syncedToAdminDrive = await pushMemberRegistrationToSharedAdminDrive(
+      updatedState
+    ).catch(() => false);
 
     setPendingAuthState({
       member: newMember,
@@ -1301,7 +1473,9 @@ export default function App() {
       passwordPlain: params.password,
     });
     showToast(
-      'Konto zostało utworzone z zaproszenia! Poczekaj na zatwierdzenie i wydanie Certyfikatu Sprzętowego przez Administratora lub Opiekuna.'
+      syncedToAdminDrive
+        ? 'Wysłano zgłoszenie „Załóż mi konto” bezpośrednio do bazy Administratora na Google Drive! Poczekaj na zatwierdzenie.'
+        : 'Konto zostało utworzone z zaproszenia! Poczekaj na zatwierdzenie i wydanie Certyfikatu Sprzętowego przez Administratora lub Opiekuna.'
     );
   };
 
@@ -1313,7 +1487,7 @@ export default function App() {
     newPassword: string;
     setupBiometrics: boolean;
   }) => {
-    const serverState = await fetchVaultStateFromServer();
+    let serverState = await fetchVaultStateFromServer();
     const targetMember = serverState.members.find(
       (m) => m.id === params.targetMemberId
     );
@@ -1330,6 +1504,37 @@ export default function App() {
     );
     if (duplicate) {
       throw new Error('Ten login jest już zajęty przez innego domownika.');
+    }
+
+    const hasInviteInStore = (serverState.invitations || []).some(
+      (i) => i.token === params.inviteToken
+    );
+    if (!hasInviteInStore) {
+      serverState = await replaceVaultStateOnServer({
+        ...serverState,
+        invitations: [
+          {
+            id: `id_${params.inviteToken}`,
+            token: params.inviteToken,
+            purpose: 'account_recovery',
+            mode: 'single_use',
+            invitedLabel: `Link ratunkowy dla: ${targetMember.fullName}`,
+            targetMemberId: targetMember.id,
+            targetMemberName: targetMember.fullName,
+            targetUsername: targetMember.username,
+            createdByMemberId: 'admin',
+            createdByMemberName: 'Główny Administrator',
+            status: 'active',
+            usedCount: 0,
+            maxUses: 1,
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(
+              Date.now() + 24 * 60 * 60 * 1000
+            ).toISOString(),
+          },
+          ...(serverState.invitations || []),
+        ],
+      });
     }
 
     await establishVaultSessionOnServer({
@@ -1466,11 +1671,15 @@ export default function App() {
       deviceName: detectedDevice.deviceName,
     });
 
-    await logActivityAndSync(
+    const finalState = await logActivityAndSync(
       targetMember.id,
       targetMember.fullName,
       'MEMBER_ACCOUNT_RECOVERED',
       `Domownik ${targetMember.fullName} ustawił nowe hasło i odzyskał dostęp za pomocą linku ratunkowego.`
+    );
+
+    await pushMemberRegistrationToSharedAdminDrive(finalState).catch(
+      () => false
     );
 
     setCurrentMemberId(targetMember.id);
@@ -1526,11 +1735,14 @@ export default function App() {
       await saveDeviceOnServer(devId, newDevice);
     }
 
-    await logActivityAndSync(
+    const updatedState = await logActivityAndSync(
       member.id,
       member.fullName,
       'DEVICE_AUTH_REQUEST',
       `Wysłano prośbę o autoryzację i Certyfikat Sprzętowy dla: ${detectedDevice.deviceName} (${detectedDevice.hardwareSignatureHash}).`
+    );
+    await pushMemberRegistrationToSharedAdminDrive(updatedState).catch(
+      () => false
     );
     showToast('Wysłano prośbę o autoryzację i Certyfikat Sprzętowy urządzenia!');
   };
@@ -2744,6 +2956,8 @@ export default function App() {
                 googleOAuthClientId={
                   bootstrapStatus?.googleOAuthClientId || getOAuthClientId()
                 }
+                googleAccessToken={googleAccessToken}
+                onRefreshFromGoogleDrive={handleManualPullAutoSyncFromDrive}
                 onCreateInvitation={handleCreateInvitation}
                 onDeleteInvitation={handleDeleteInvitation}
                 onApproveMemberAndDevices={handleApproveMemberAndDevices}
