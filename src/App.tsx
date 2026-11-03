@@ -59,6 +59,7 @@ import {
   downloadVaultBackupFromDrive,
   getGoogleAccessToken,
   getOAuthClientId,
+  loadPublicRuntimeOAuthConfig,
   pullSharedVaultStateFromAdminDriveForMember,
   pullVaultStateFromDriveAutoSync,
   pushVaultStateToDriveAutoSync,
@@ -96,7 +97,6 @@ import { AddPasswordModal } from './components/AddPasswordModal';
 import { AuthAndBootstrapView } from './components/AuthAndBootstrapView';
 import { AdminTab2AccountsAndDevices } from './components/AdminTab2AccountsAndDevices';
 import { AdminTab3ConfigAndBackup } from './components/AdminTab3ConfigAndBackup';
-import { AdminTab4GitHubAndUpdates } from './components/AdminTab4GitHubAndUpdates';
 import { UserProfileView } from './components/UserProfileView';
 
 function makeId(prefix: string): string {
@@ -272,13 +272,64 @@ export default function App() {
     }, 1000);
   };
 
-  // Non-destructive application update handler
+  // Non-destructive application update handler: downloads latest PWA bundle from GitHub Pages, syncs Google Drive state, activates new Service Worker, and reloads automatically
   const handleTriggerAppUpdate = useCallback(async () => {
     setIsUpdatingApp(true);
     try {
       setVaultApiSessionContext({
         deviceFingerprint: detectedDevice.deviceFingerprint,
       });
+
+      // 1. Refresh public OAuth config & sync latest encrypted database from Google Drive (Admin or Family Member shared file)
+      await loadPublicRuntimeOAuthConfig().catch(() => '');
+
+      const activeGoogleToken = googleAccessToken || getGoogleAccessToken();
+      if (activeGoogleToken) {
+        try {
+          const pulled = await pullVaultStateFromDriveAutoSync(
+            activeGoogleToken,
+            syncEncryptionKey
+          );
+          if (
+            pulled &&
+            pulled.state &&
+            Array.isArray(pulled.state.members) &&
+            pulled.state.members.length > 0
+          ) {
+            await replaceVaultStateOnServer({
+              ...pulled.state,
+              driveSyncFileId: pulled.fileId,
+              syncEncryptionKey:
+                pulled.syncEncryptionKey || syncEncryptionKey,
+            });
+          }
+        } catch (driveErr) {
+          console.warn('Auto-Sync pull during app update:', driveErr);
+        }
+      } else if (driveSyncFileId && syncEncryptionKey) {
+        try {
+          const sharedPulled = await pullSharedVaultStateFromAdminDriveForMember(
+            {
+              driveFileId: driveSyncFileId,
+              syncEncryptionKey,
+            }
+          );
+          if (
+            sharedPulled &&
+            sharedPulled.state &&
+            Array.isArray(sharedPulled.state.members) &&
+            sharedPulled.state.members.length > 0
+          ) {
+            await replaceVaultStateOnServer({
+              ...sharedPulled.state,
+              driveSyncFileId,
+              syncEncryptionKey,
+            });
+          }
+        } catch (sharedErr) {
+          console.warn('Shared Drive pull during app update:', sharedErr);
+        }
+      }
 
       const [latestBoot, latestState] = await Promise.all([
         fetchBootstrapStatusFromServer().catch(() => null),
@@ -292,6 +343,27 @@ export default function App() {
       }
       applyServerState(latestState);
 
+      // 2. Purge outdated Workbox asset caches (while preserving PWA handoff cache)
+      if ('caches' in window) {
+        const cacheKeys = await window.caches.keys();
+        for (const key of cacheKeys) {
+          if (key !== 'fsv-pwa-handoff-cache-v1') {
+            await window.caches.delete(key).catch(() => {});
+          }
+        }
+      }
+
+      // 3. Force network download of the newest HTML & manifest from GitHub Pages
+      await Promise.all([
+        fetch(`./index.html?pwa_update=${Date.now()}`, {
+          cache: 'reload',
+        }).catch(() => null),
+        fetch(`./manifest.webmanifest?pwa_update=${Date.now()}`, {
+          cache: 'reload',
+        }).catch(() => null),
+      ]);
+
+      // 4. Update & activate Service Worker immediately
       if ('serviceWorker' in navigator) {
         const registrations = await navigator.serviceWorker.getRegistrations();
         for (const reg of registrations) {
@@ -302,25 +374,27 @@ export default function App() {
         }
       }
 
-      if ('caches' in window) {
-        const cacheKeys = await window.caches.keys();
-        for (const key of cacheKeys) {
-          await window.caches.delete(key).catch(() => {});
-        }
-      }
-
       showToast(
-        'Zaktualizowano aplikację i zsynchronizowano bazę z serwerem (dane loginów zachowane)!'
+        'Pobrano i zainstalowano najnowszą wersję aplikacji! Automatyczne przeładowanie...'
       );
+
+      window.setTimeout(() => {
+        window.location.reload();
+      }, 900);
     } catch (err) {
       console.warn('App update check error:', err);
       showToast(
         'Sprawdzono aktualizacje — posiadasz najnowszą wersję aplikacji.'
       );
-    } finally {
       setIsUpdatingApp(false);
     }
-  }, [applyServerState, detectedDevice.deviceFingerprint]);
+  }, [
+    applyServerState,
+    detectedDevice.deviceFingerprint,
+    driveSyncFileId,
+    googleAccessToken,
+    syncEncryptionKey,
+  ]);
 
   const handleInstallPWAOrGuide = useCallback(async () => {
     if (isInstallable) {
@@ -2522,7 +2596,7 @@ export default function App() {
         }
         onOpenAddPassword={() => setIsAddModalOpen(true)}
         onLogout={handleLogout}
-      />
+              />
 
       {/* Live Clipboard Auto-Clear Countdown Bar */}
       {clipboardCountdown && (
@@ -2720,20 +2794,7 @@ export default function App() {
                   handleRestoreBackupFromDriveFileId
                 }
               />
-            ) : isOwnerAdmin && activeAdminTab === 'github' ? (
-              /* ADMIN TAB 4: GitHub Commit & Push (Czysty Silnik) */
-              <AdminTab4GitHubAndUpdates
-                onLogActivity={async (actionType: string, details: string) => {
-                  await logActivityAndSync(
-                    currentMember.id,
-                    currentMember.fullName,
-                    actionType,
-                    details
-                  );
-                  showToast('Czysty kod aplikacji został wysłany na GitHub!');
-                }}
-              />
-            ) : (
+                          ) : (
               /* CLEAN PASSWORD VAULT VIEW (Identical privacy rules for all users + Section 03 for revealed entries) */
               <div className="space-y-8">
                 {/* Search, Section Quick-Filter, Category Filter & Sort Toolbar */}

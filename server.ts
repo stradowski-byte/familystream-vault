@@ -419,6 +419,7 @@ function collectProjectSourceFiles(rootDir: string): Array<{
     'vault-db.json',
     'vault-bootstrap.json',
     'package-lock.json',
+    'AdminTab4GitHubAndUpdates.tsx',
   ]);
 
   function walk(currentDir: string) {

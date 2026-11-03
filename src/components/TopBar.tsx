@@ -18,7 +18,7 @@ interface TopBarProps {
   onToggleTheme: () => void;
   onOpenAddPassword: () => void;
   onLogout: () => void;
-}
+  }
 
 export const TopBar: React.FC<TopBarProps> = ({
   currentMember,
@@ -29,7 +29,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   onToggleTheme,
   onOpenAddPassword,
   onLogout,
-}) => {
+  }) => {
   const isAdmin = isPrimaryAdmin(currentMember);
   const isTrustedCoAdmin = isCoAdmin(currentMember);
 
@@ -101,18 +101,7 @@ export const TopBar: React.FC<TopBarProps> = ({
                 >
                   Kopie i Konfiguracja
                 </button>
-                <button
-                  type="button"
-                  onClick={() => onSelectTab('github')}
-                  className={`py-1 transition-colors whitespace-nowrap shrink-0 border-b-2 cursor-pointer ${
-                    activeTab === 'github'
-                      ? 'text-[var(--vault-text)] border-[var(--vault-accent)] font-semibold'
-                      : 'border-transparent hover:text-[var(--vault-text)]'
-                  }`}
-                >
-                  GitHub
-                </button>
-              </>
+                              </>
             )}
 
             {isTrustedCoAdmin && (
