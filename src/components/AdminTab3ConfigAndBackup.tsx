@@ -463,16 +463,16 @@ export const AdminTab3ConfigAndBackup: React.FC<
                   (kliknij <strong>Enable</strong>).
                 </li>
                 <li>
-                  Skonfiguruj ekran zgody na{' '}
+                  Dodaj swój adres Gmail jako testera (naprawia <strong>Błąd 403: access_denied</strong>): wejdź na{' '}
                   <a
-                    href="https://console.cloud.google.com/apis/credentials/consent"
+                    href="https://console.cloud.google.com/auth/audience"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-[var(--vault-accent)] underline font-mono"
                   >
-                    console.cloud.google.com/apis/credentials/consent
+                    console.cloud.google.com/auth/audience
                   </a>{' '}
-                  (typ <strong>External</strong>, a w zakładce <strong>Audience</strong> kliknij <strong>Publish App</strong> lub dodaj swój Gmail jako <strong>Test user</strong>).
+                  (zakładka <strong>Audience / Odbiorcy</strong>), w sekcji <strong>Test users</strong> kliknij <strong>+ Add users</strong>, wpisz swój adres Gmail (np. <code>stradowski@gmail.com</code>) i zapisz — lub kliknij wyżej <strong>Publish App</strong>.
                 </li>
                 <li>
                   Utwórz identyfikator na{' '}

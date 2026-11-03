@@ -917,27 +917,33 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
 
                 <li>
                   <strong className="text-[var(--vault-text)]">
-                    Skonfiguruj ekran zgody (OAuth consent screen):
+                    Dodaj swój e-mail jako testera (naprawia „Błąd 403: access_denied”):
                   </strong>{' '}
-                  Otwórz{' '}
+                  Otwórz zakładkę{' '}
+                  <a
+                    href="https://console.cloud.google.com/auth/audience"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[var(--vault-accent)] underline font-mono break-all"
+                  >
+                    console.cloud.google.com/auth/audience
+                  </a>{' '}
+                  (lub{' '}
                   <a
                     href="https://console.cloud.google.com/apis/credentials/consent"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-[var(--vault-accent)] underline font-mono break-all"
                   >
-                    console.cloud.google.com/apis/credentials/consent
+                    OAuth consent screen → Audience
                   </a>
-                  :
+                  ):
                   <ul className="list-disc list-inside pl-3 mt-1 space-y-1">
                     <li>
-                      Wybierz typ użytkowników <strong>External (Zewnętrzni)</strong> i kliknij <strong>Create</strong>.
+                      Zjedź niżej do sekcji <strong>Test users (Użytkownicy testowi)</strong>, kliknij przycisk <strong>+ Add users (Dodaj użytkowników)</strong>, wpisz swój własny adres Gmail (np. <code>stradowski@gmail.com</code>) i kliknij <strong>Save (Zapisz)</strong>.
                     </li>
                     <li>
-                      Wpisz nazwę aplikacji (np. <code>FamilyStream Vault</code>), wybierz swój adres e-mail w polach kontaktowych i zapisz.
-                    </li>
-                    <li>
-                      W zakładce <strong>Audience (Odbiorcy)</strong> kliknij <strong>Publish App (Opublikuj aplikację)</strong> lub dodaj swój adres Gmail na listę <strong>Test users</strong>.
+                      <em>Alternatywnie:</em> w sekcji <strong>Publishing status</strong> możesz kliknąć <strong>Publish App (Opublikuj aplikację)</strong> — wtedy nie trzeba dopisywać adresów do listy testerów.
                     </li>
                   </ul>
                 </li>
