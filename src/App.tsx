@@ -546,8 +546,17 @@ export default function App() {
   };
 
   // 1. FIRST-ADMIN CLAIM & ADMIN GOOGLE LOGIN
-  const handleAdminGoogleLogin = async () => {
-    const identity = await signInWithGoogleAdminDirect();
+  const handleAdminGoogleLogin = async (options?: {
+    email?: string;
+    displayName?: string;
+    masterPassword?: string;
+    skipOAuthPopup?: boolean;
+  }) => {
+    const identity = await signInWithGoogleAdminDirect({
+      email: options?.email,
+      displayName: options?.displayName,
+      skipOAuthPopup: options?.skipOAuthPopup,
+    });
     if (identity.accessToken) {
       setGoogleAccessToken(identity.accessToken);
     }
@@ -603,12 +612,15 @@ export default function App() {
       const adminMemberId =
         serverState.vaultConfig?.adminMemberId || makeId('mem_admin');
       const salt = generateSaltBase64(16);
-      const internalSecret = `google_admin_${identity.uid}_${salt}`;
-      const passwordHash = await hashPasswordForAuth(internalSecret, salt);
+      const effectivePassword =
+        options?.masterPassword && options.masterPassword.trim().length >= 4
+          ? options.masterPassword.trim()
+          : `google_admin_${identity.uid}_${salt}`;
+      const passwordHash = await hashPasswordForAuth(effectivePassword, salt);
       dekBase64 = generateRandomDekBase64();
       const wrappedMasterKey = await wrapDekWithPassword(
         dekBase64,
-        internalSecret,
+        effectivePassword,
         salt
       );
       const vaultEscrowKey = await wrapDekForMergeEscrow(dekBase64, salt);

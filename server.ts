@@ -3,7 +3,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer as createViteServer } from 'vite';
+import {
+  build as buildViteBundle,
+  createServer as createViteServer,
+} from 'vite';
 import type {
   ActivityLog,
   Device,
@@ -387,21 +390,27 @@ function stripAiStudioOnlyBlocks(sourceText: string): string {
     .replace(lineCommentPattern, '');
 }
 
+function computeGitBlobSha(buf: Buffer): string {
+  const header = Buffer.from(`blob ${buf.length}\0`, 'utf-8');
+  return crypto.createHash('sha1').update(header).update(buf).digest('hex');
+}
+
 /**
  * Helper to collect all application code files for non-destructive GitHub Commit & Push
- * (strictly excluding `data/`, `node_modules/`, `dist/`, `.git/`, `.env` secrets,
+ * (strictly excluding `data/`, `node_modules/`, `dist/`, `.git/`, `.github/`, `.env` secrets,
  * and stripping AI Studio-only preview helpers so production GitHub code has no skip button).
  */
 function collectProjectSourceFiles(rootDir: string): Array<{
   relativePath: string;
-  contentBase64: string;
+  buffer: Buffer;
 }> {
-  const results: Array<{ relativePath: string; contentBase64: string }> = [];
+  const results: Array<{ relativePath: string; buffer: Buffer }> = [];
   const excludedDirs = new Set([
     'node_modules',
     'dist',
     'data',
     '.git',
+    '.github',
     '.aistudio',
   ]);
   const excludedFiles = new Set([
@@ -437,12 +446,12 @@ function collectProjectSourceFiles(rootDir: string): Array<{
           const cleanedText = stripAiStudioOnlyBlocks(buf.toString('utf-8'));
           results.push({
             relativePath: relPath,
-            contentBase64: Buffer.from(cleanedText, 'utf-8').toString('base64'),
+            buffer: Buffer.from(cleanedText, 'utf-8'),
           });
         } else {
           results.push({
             relativePath: relPath,
-            contentBase64: buf.toString('base64'),
+            buffer: buf,
           });
         }
       }
@@ -450,6 +459,55 @@ function collectProjectSourceFiles(rootDir: string): Array<{
   }
 
   walk(rootDir);
+  return results;
+}
+
+function collectBuiltDistFiles(distDir: string): Array<{
+  relativePath: string;
+  buffer: Buffer;
+}> {
+  const results: Array<{ relativePath: string; buffer: Buffer }> = [];
+  if (!fs.existsSync(distDir)) return results;
+
+  function walkDist(currentDir: string) {
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name.startsWith('.DS_Store') || entry.name.endsWith('.tmp')) {
+        continue;
+      }
+      const fullPath = path.join(currentDir, entry.name);
+      const relPath = path
+        .relative(distDir, fullPath)
+        .split(path.sep)
+        .join('/');
+
+      if (entry.isDirectory()) {
+        walkDist(fullPath);
+      } else if (entry.isFile()) {
+        results.push({
+          relativePath: relPath,
+          buffer: fs.readFileSync(fullPath),
+        });
+      }
+    }
+  }
+
+  walkDist(distDir);
+
+  const indexFile = results.find((f) => f.relativePath === 'index.html');
+  if (indexFile && !results.some((f) => f.relativePath === '404.html')) {
+    results.push({
+      relativePath: '404.html',
+      buffer: indexFile.buffer,
+    });
+  }
+  if (!results.some((f) => f.relativePath === '.nojekyll')) {
+    results.push({
+      relativePath: '.nojekyll',
+      buffer: Buffer.from('', 'utf-8'),
+    });
+  }
+
   return results;
 }
 
@@ -1240,7 +1298,7 @@ async function startServer() {
         branch = 'main',
         commitMessage,
         createRepoIfMissing = true,
-        isPrivateRepo = true,
+        isPrivateRepo = false,
       } = (req.body || {}) as {
         personalAccessToken?: string;
         repoOwner?: string;
@@ -1309,11 +1367,27 @@ async function startServer() {
       let repoExists = false;
       let createdNewRepo = false;
       try {
-        await githubApiRequest(
+        const existingRepoRes = await githubApiRequest<{ private?: boolean }>(
           `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}`,
           cleanToken
         );
         repoExists = true;
+        if (existingRepoRes.data?.private !== isPrivateRepo) {
+          try {
+            await githubApiRequest(
+              `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}`,
+              cleanToken,
+              {
+                method: 'PATCH',
+                body: JSON.stringify({
+                  private: isPrivateRepo,
+                }),
+              }
+            );
+          } catch {
+            // Ignore visibility patch error if token lacks admin permission
+          }
+        }
       } catch (err) {
         const status = (err as { status?: number })?.status;
         if (status === 404 && createRepoIfMissing) {
@@ -1346,149 +1420,254 @@ async function startServer() {
         return;
       }
 
-      // 3. Collect all application source files (strictly excluding `data/`, `node_modules/`, `dist/`)
+      // 3. Collect all application source files (strictly excluding `data/`, `node_modules/`, `dist/`, `.github/`)
       const sourceFiles = collectProjectSourceFiles(__dirname);
 
-      // 4. Check if target branch ref exists
-      let parentCommitSha: string | null = null;
-      let baseTreeSha: string | null = null;
+      // Helper to push a set of files to a target branch using delta SHA matching (only uploads changed blobs)
+      const pushBranchWithDelta = async (params: {
+        targetBranch: string;
+        files: Array<{ relativePath: string; buffer: Buffer }>;
+        message: string;
+        ensureRepoInitialized: boolean;
+      }): Promise<{ commitSha: string; updatedBlobsCount: number }> => {
+        let parentCommitSha: string | null = null;
+        let baseTreeSha: string | null = null;
+        const existingBlobShas = new Map<string, string>();
 
+        try {
+          const refRes = await githubApiRequest<{
+            object: { sha: string };
+          }>(
+            `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/ref/heads/${encodeURIComponent(params.targetBranch)}`,
+            cleanToken
+          );
+          parentCommitSha = refRes.data.object.sha;
+
+          const commitRes = await githubApiRequest<{
+            tree: { sha: string };
+          }>(
+            `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/commits/${parentCommitSha}`,
+            cleanToken
+          );
+          baseTreeSha = commitRes.data.tree.sha;
+
+          if (baseTreeSha) {
+            const existingTreeRes = await githubApiRequest<{
+              tree?: Array<{ path?: string; sha?: string; type?: string }>;
+            }>(
+              `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/trees/${baseTreeSha}?recursive=1`,
+              cleanToken
+            );
+            for (const item of existingTreeRes.data?.tree || []) {
+              if (item.type === 'blob' && item.path && item.sha) {
+                existingBlobShas.set(item.path, item.sha);
+              }
+            }
+          }
+        } catch (err) {
+          const status = (err as { status?: number })?.status;
+          if ((status === 404 || status === 409) && params.ensureRepoInitialized) {
+            try {
+              await githubApiRequest(
+                `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/contents/README.md`,
+                cleanToken,
+                {
+                  method: 'PUT',
+                  body: JSON.stringify({
+                    message: 'Initial commit (FamilyStream Vault)',
+                    content: Buffer.from(
+                      '# FamilyStream Vault\nRodzinny Skarbiec Haseł i Kont VOD (PWA).\n',
+                      'utf-8'
+                    ).toString('base64'),
+                    branch: params.targetBranch,
+                  }),
+                }
+              );
+              const refRes = await githubApiRequest<{
+                object: { sha: string };
+              }>(
+                `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/ref/heads/${encodeURIComponent(params.targetBranch)}`,
+                cleanToken
+              );
+              parentCommitSha = refRes.data.object.sha;
+            } catch {
+              // Proceed if README already exists or branch is being created fresh
+            }
+          } else if (status !== 404 && status !== 409) {
+            throw err;
+          }
+        }
+
+        const treeItems: Array<{
+          path: string;
+          mode: '100644';
+          type: 'blob';
+          sha: string;
+        }> = [];
+        let updatedBlobsCount = 0;
+
+        for (const file of params.files) {
+          const localSha = computeGitBlobSha(file.buffer);
+          const remoteSha = existingBlobShas.get(file.relativePath);
+
+          if (remoteSha && remoteSha === localSha) {
+            treeItems.push({
+              path: file.relativePath,
+              mode: '100644',
+              type: 'blob',
+              sha: remoteSha,
+            });
+          } else {
+            const blobRes = await githubApiRequest<{ sha: string }>(
+              `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/blobs`,
+              cleanToken,
+              {
+                method: 'POST',
+                body: JSON.stringify({
+                  content: file.buffer.toString('base64'),
+                  encoding: 'base64',
+                }),
+              }
+            );
+            updatedBlobsCount += 1;
+            treeItems.push({
+              path: file.relativePath,
+              mode: '100644',
+              type: 'blob',
+              sha: blobRes.data.sha,
+            });
+          }
+        }
+
+        const treeRes = await githubApiRequest<{ sha: string }>(
+          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/trees`,
+          cleanToken,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              tree: treeItems,
+            }),
+          }
+        );
+
+        const newCommitRes = await githubApiRequest<{
+          sha: string;
+          html_url?: string;
+        }>(
+          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/commits`,
+          cleanToken,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              message: params.message,
+              tree: treeRes.data.sha,
+              parents: parentCommitSha ? [parentCommitSha] : [],
+            }),
+          }
+        );
+
+        const commitSha = newCommitRes.data.sha;
+
+        if (parentCommitSha) {
+          await githubApiRequest(
+            `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/refs/heads/${encodeURIComponent(params.targetBranch)}`,
+            cleanToken,
+            {
+              method: 'PATCH',
+              body: JSON.stringify({
+                sha: commitSha,
+                force: true,
+              }),
+            }
+          );
+        } else {
+          await githubApiRequest(
+            `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/refs`,
+            cleanToken,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                ref: `refs/heads/${params.targetBranch}`,
+                sha: commitSha,
+              }),
+            }
+          );
+        }
+
+        return { commitSha, updatedBlobsCount };
+      };
+
+      // 4. Push source files to main branch (works on 1st creation and every subsequent update)
+      const mainPush = await pushBranchWithDelta({
+        targetBranch: cleanBranch,
+        files: sourceFiles,
+        message: finalCommitMessage,
+        ensureRepoInitialized: true,
+      });
+      const newCommitSha = mainPush.commitSha;
+
+      // 5. Build production PWA bundle (`dist/`) and publish directly to `gh-pages` branch using the same `repo` token
+      let ghPagesPublished = false;
       try {
-        const refRes = await githubApiRequest<{
-          object: { sha: string };
-        }>(
-          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/ref/heads/${encodeURIComponent(cleanBranch)}`,
-          cleanToken
-        );
-        parentCommitSha = refRes.data.object.sha;
+        await buildViteBundle({
+          root: __dirname,
+          logLevel: 'silent',
+        });
+        const distFiles = collectBuiltDistFiles(path.join(__dirname, 'dist'));
+        if (distFiles.length > 0) {
+          await pushBranchWithDelta({
+            targetBranch: 'gh-pages',
+            files: distFiles,
+            message: `chore(pages): deploy online PWA build (${newCommitSha.slice(0, 7)})`,
+            ensureRepoInitialized: false,
+          });
+          ghPagesPublished = true;
+        }
+      } catch (buildOrPagesErr) {
+        console.warn('Direct gh-pages build/push warning:', buildOrPagesErr);
+      }
 
-        const commitRes = await githubApiRequest<{
-          tree: { sha: string };
-        }>(
-          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/commits/${parentCommitSha}`,
-          cleanToken
+      // 6. Enable/Update GitHub Pages pointing to `gh-pages` branch (requires only `repo` scope!)
+      const computedPagesUrl = `https://${cleanOwner.toLowerCase()}.github.io/${cleanRepo}/`;
+      let pagesEnabled = false;
+      const pagesTargetBranch = ghPagesPublished ? 'gh-pages' : cleanBranch;
+      try {
+        await githubApiRequest(
+          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/pages`,
+          cleanToken,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              source: {
+                branch: pagesTargetBranch,
+                path: '/',
+              },
+            }),
+          }
         );
-        baseTreeSha = commitRes.data.tree.sha;
-      } catch (err) {
-        const status = (err as { status?: number })?.status;
-        if (status === 404 || status === 409) {
-          // Initialize empty repository with README.md via Contents API so Git Data API works cleanly
+        pagesEnabled = true;
+      } catch (pagesErr) {
+        const pStatus = (pagesErr as { status?: number })?.status;
+        if (pStatus === 409) {
+          pagesEnabled = true;
           try {
             await githubApiRequest(
-              `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/contents/README.md`,
+              `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/pages`,
               cleanToken,
               {
                 method: 'PUT',
                 body: JSON.stringify({
-                  message: 'Initial commit (FamilyStream Vault)',
-                  content: Buffer.from(
-                    '# FamilyStream Vault\nRodzinny Skarbiec Haseł i Kont VOD (PWA).\n',
-                    'utf-8'
-                  ).toString('base64'),
-                  branch: cleanBranch,
+                  source: {
+                    branch: pagesTargetBranch,
+                    path: '/',
+                  },
                 }),
               }
             );
-            const refRes = await githubApiRequest<{
-              object: { sha: string };
-            }>(
-              `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/ref/heads/${encodeURIComponent(cleanBranch)}`,
-              cleanToken
-            );
-            parentCommitSha = refRes.data.object.sha;
           } catch {
-            // Proceed if README already exists or ref is still initializing
+            // already configured
           }
-        } else {
-          throw err;
         }
-      }
-
-      // 5. Create Git blobs for each file
-      const treeItems: Array<{
-        path: string;
-        mode: '100644';
-        type: 'blob';
-        sha: string;
-      }> = [];
-
-      for (const file of sourceFiles) {
-        const blobRes = await githubApiRequest<{ sha: string }>(
-          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/blobs`,
-          cleanToken,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              content: file.contentBase64,
-              encoding: 'base64',
-            }),
-          }
-        );
-        treeItems.push({
-          path: file.relativePath,
-          mode: '100644',
-          type: 'blob',
-          sha: blobRes.data.sha,
-        });
-      }
-
-      // 6. Create Git tree
-      const treeRes = await githubApiRequest<{ sha: string }>(
-        `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/trees`,
-        cleanToken,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            ...(baseTreeSha ? { base_tree: baseTreeSha } : {}),
-            tree: treeItems,
-          }),
-        }
-      );
-
-      // 7. Create Git commit
-      const newCommitRes = await githubApiRequest<{
-        sha: string;
-        html_url?: string;
-      }>(
-        `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/commits`,
-        cleanToken,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            message: finalCommitMessage,
-            tree: treeRes.data.sha,
-            parents: parentCommitSha ? [parentCommitSha] : [],
-          }),
-        }
-      );
-
-      const newCommitSha = newCommitRes.data.sha;
-
-      // 8. Update or create branch ref
-      if (parentCommitSha) {
-        await githubApiRequest(
-          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/refs/heads/${encodeURIComponent(cleanBranch)}`,
-          cleanToken,
-          {
-            method: 'PATCH',
-            body: JSON.stringify({
-              sha: newCommitSha,
-              force: true,
-            }),
-          }
-        );
-      } else {
-        await githubApiRequest(
-          `https://api.github.com/repos/${encodeURIComponent(cleanOwner)}/${encodeURIComponent(cleanRepo)}/git/refs`,
-          cleanToken,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              ref: `refs/heads/${cleanBranch}`,
-              sha: newCommitSha,
-            }),
-          }
-        );
       }
 
       const pushedAt = new Date().toISOString();
@@ -1502,6 +1681,9 @@ async function startServer() {
         lastCommitSha: newCommitSha,
         lastCommitUrl: commitUrl,
         lastPushedAt: pushedAt,
+        pagesUrl: computedPagesUrl,
+        pagesEnabled,
+        isPrivateRepo,
       };
       saveBootstrapMetaToDisk(bootstrapMeta);
 
@@ -1510,8 +1692,13 @@ async function startServer() {
         commitSha: newCommitSha,
         commitUrl,
         repoUrl,
+        pagesUrl: computedPagesUrl,
+        pagesEnabled,
+        ghPagesPublished,
+        isPrivateRepo,
         branch: cleanBranch,
         filesCount: sourceFiles.length,
+        updatedBlobsCount: mainPush.updatedBlobsCount,
         pushedAt,
         createdNewRepo,
         repoOwner: cleanOwner,

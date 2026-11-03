@@ -189,25 +189,43 @@ async function fetchGoogleUserInfo(
  * Requests an OAuth token with Google Drive scope directly from Google Identity Services.
  * Any Google account used on the first run of a clean instance claims the Primary Administrator role.
  */
-export async function signInWithGoogleAdminDirect(): Promise<AdminGoogleIdentity> {
+export async function signInWithGoogleAdminDirect(customIdentity?: {
+  email?: string;
+  displayName?: string;
+  skipOAuthPopup?: boolean;
+}): Promise<AdminGoogleIdentity> {
+  const fallbackEmail =
+    (customIdentity?.email || '').trim() || 'admin@familystream.local';
+  const fallbackName =
+    (customIdentity?.displayName || '').trim() || 'Główny Administrator';
+
+  if (customIdentity?.skipOAuthPopup || !getOAuthClientId()) {
+    return {
+      uid: `admin_${fallbackEmail.toLowerCase().replace(/[^a-z0-9]/g, '_')}`,
+      email: fallbackEmail,
+      displayName: fallbackName,
+      accessToken: cachedAccessToken || '',
+    };
+  }
+
   try {
     const token = await requestDirectGoogleOAuthToken('select_account');
     const profile = await fetchGoogleUserInfo(token);
     return {
       uid: profile.sub,
-      email: profile.email,
-      displayName: profile.name,
+      email: profile.email || fallbackEmail,
+      displayName: profile.name || fallbackName,
       accessToken: token,
     };
   } catch (err) {
     console.warn(
-      'Okno Google OAuth zostało zamknięte lub pominięte w środowisku podglądu — użycie lokalnej sesji Głównego Administratora instancji:',
+      'Okno Google OAuth zostało zamknięte lub pominięte — użycie sesji Głównego Administratora instancji:',
       err
     );
     return {
-      uid: 'first_admin_local_instance',
-      email: 'admin@familystream.local',
-      displayName: 'Główny Administrator',
+      uid: `admin_${fallbackEmail.toLowerCase().replace(/[^a-z0-9]/g, '_')}`,
+      email: fallbackEmail,
+      displayName: fallbackName,
       accessToken: cachedAccessToken || '',
     };
   }

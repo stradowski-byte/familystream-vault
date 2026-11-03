@@ -852,10 +852,10 @@ export const AdminTab2AccountsAndDevices: React.FC<
                 {/* PANEL B: Emergency Password / Login Reset Panel */}
                 {resettingMemberId === member.id && canResetThisMember && (
                   <div className="p-4 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-4 text-xs">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[var(--vault-border)] pb-2.5">
-                      <div>
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-[var(--vault-border)] pb-2.5">
+                      <div className="min-w-0">
                         <div className="font-semibold text-[var(--vault-accent)] flex items-center gap-1.5">
-                          <KeyRound className="w-3.5 h-3.5" />
+                          <KeyRound className="w-3.5 h-3.5 shrink-0" />
                           <span>
                             Pomoc Awaryjna — Reset dostępu dla: {member.fullName}
                           </span>
@@ -871,9 +871,9 @@ export const AdminTab2AccountsAndDevices: React.FC<
                         onClick={() =>
                           handleQuickCreateRecoveryLinkForMember(member)
                         }
-                        className="inline-flex items-center gap-1.5 px-3 py-2 font-semibold text-[var(--vault-text)] border border-[var(--vault-accent)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg cursor-pointer shrink-0"
+                        className="inline-flex items-center gap-1.5 px-3 py-2 font-semibold text-[var(--vault-text)] border border-[var(--vault-accent)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg cursor-pointer text-left leading-snug self-start md:self-center"
                       >
-                        <Link2 className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                        <Link2 className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
                         <span>
                           Sposób B: Skopiuj jednorazowy Link Ratunkowy dla tej osoby
                         </span>

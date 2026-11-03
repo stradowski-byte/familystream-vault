@@ -60,6 +60,9 @@ export interface GitHubSyncConfig {
   lastCommitSha?: string;
   lastCommitUrl?: string;
   lastPushedAt?: string;
+  pagesUrl?: string;
+  pagesEnabled?: boolean;
+  isPrivateRepo?: boolean;
   hasServerSecretPat?: boolean;
   secretPatSource?: 'GITHUB_PAT_ENV' | 'SAVED_SERVER_TOKEN' | 'NONE';
 }
@@ -69,8 +72,13 @@ export interface GitHubPushResult {
   commitSha: string;
   commitUrl: string;
   repoUrl: string;
+  pagesUrl?: string;
+  pagesEnabled?: boolean;
+  ghPagesPublished?: boolean;
+  isPrivateRepo?: boolean;
   branch: string;
   filesCount: number;
+  updatedBlobsCount?: number;
   pushedAt: string;
   createdNewRepo?: boolean;
   repoOwner?: string;

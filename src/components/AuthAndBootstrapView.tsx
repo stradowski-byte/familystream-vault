@@ -27,7 +27,11 @@ import {
   DetectedDeviceProfile,
   StoredBiometricProfile,
 } from '../lib/deviceAndBiometrics';
-import { verifyInvitationTokenOnServer } from '../lib/vaultApiClient';
+import {
+  saveGoogleOAuthClientIdOnServer,
+  verifyInvitationTokenOnServer,
+} from '../lib/vaultApiClient';
+import { setConfiguredGoogleOAuthClientId } from '../lib/googleOAuthAndDriveSync';
 
 interface AuthAndBootstrapViewProps {
   vaultConfig: VaultConfig | null;
@@ -46,7 +50,12 @@ interface AuthAndBootstrapViewProps {
   onInstallPWA: () => void;
   onTriggerAppUpdate: () => Promise<void>;
   isUpdatingApp: boolean;
-  onAdminGoogleLogin: () => Promise<void>;
+  onAdminGoogleLogin: (options?: {
+    email?: string;
+    displayName?: string;
+    masterPassword?: string;
+    skipOAuthPopup?: boolean;
+  }) => Promise<void>;
   onLoginWithCredentials: (username: string, password: string) => Promise<void>;
   onRegisterMemberAccountWithInvite: (params: {
     inviteToken: string;
@@ -147,6 +156,16 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [isAdminLoading, setIsAdminLoading] = useState(false);
   const [isFamilyLoading, setIsFamilyLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // First-Admin Startup Wizard State (Zero-Secret Google & Local Init)
+  const [adminEmailInput, setAdminEmailInput] = useState('');
+  const [adminNameInput, setAdminNameInput] = useState('Główny Administrator');
+  const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
+  const [showOptionalOAuthConfig, setShowOptionalOAuthConfig] = useState(false);
+  const [customOAuthClientId, setCustomOAuthClientId] = useState(
+    bootstrapStatus?.googleOAuthClientId || ''
+  );
+  const [oauthSavedMsg, setOauthSavedMsg] = useState<string | null>(null);
 
   // Verify invite token whenever `inviteToken` changes
   useEffect(() => {
@@ -376,11 +395,22 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   }
 
   // Handlers
-  const handleAdminClick = async () => {
+  const handleAdminClick = async (skipOAuthPopup = false) => {
     setErrorMsg(null);
     setIsAdminLoading(true);
     try {
-      await onAdminGoogleLogin();
+      if (customOAuthClientId.trim()) {
+        setConfiguredGoogleOAuthClientId(customOAuthClientId.trim());
+        await saveGoogleOAuthClientIdOnServer(customOAuthClientId.trim()).catch(
+          () => {}
+        );
+      }
+      await onAdminGoogleLogin({
+        email: adminEmailInput.trim() || undefined,
+        displayName: adminNameInput.trim() || undefined,
+        masterPassword: adminMasterPasswordInput.trim() || undefined,
+        skipOAuthPopup,
+      });
     } catch (err) {
       setErrorMsg(
         err instanceof Error
@@ -390,6 +420,17 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     } finally {
       setIsAdminLoading(false);
     }
+  };
+
+  const handleSaveOptionalClientId = async () => {
+    const cleaned = customOAuthClientId.trim();
+    setConfiguredGoogleOAuthClientId(cleaned);
+    await saveGoogleOAuthClientIdOnServer(cleaned).catch(() => {});
+    setOauthSavedMsg(
+      cleaned
+        ? 'Zapisano identyfikator Google OAuth Client ID.'
+        : 'Wyczyszczono opcjonalny Client ID — aktywny tryb bezkluczowy.'
+    );
   };
 
   
@@ -523,14 +564,18 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {canInstallPWA && !isPWAInstalled && (
+          {!isPWAInstalled && detectedDevice.clientMode !== 'pwa' && (
             <button
               type="button"
               onClick={onInstallPWA}
               className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer"
             >
-              <Download className="w-3.5 h-3.5" />
-              <span>Zainstaluj jako aplikację</span>
+              <Download className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {canInstallPWA
+                  ? 'Zainstaluj jako aplikację (PWA)'
+                  : 'Jak zainstalować aplikację lokalnie'}
+              </span>
             </button>
           )}
 
@@ -541,7 +586,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-bg)] hover:bg-[var(--vault-surface-hover)] rounded-lg transition-colors cursor-pointer"
           >
             <RefreshCw
-              className={`w-3.5 h-3.5 text-[var(--vault-accent)] ${
+              className={`w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0 ${
                 isUpdatingApp ? 'animate-spin' : ''
               }`}
             />
@@ -554,85 +599,183 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
 
       {/* CASE 1: FRESH UNINITIALIZED INSTANCE FROM GITHUB -> FIRST ADMIN CLAIM */}
       {!isVaultInitialized ? (
-        <div className="p-6 sm:p-7 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5">
+        <div className="p-5 sm:p-7 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5 overflow-hidden">
           <div className="space-y-2">
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
-              <Sparkles className="w-4 h-4" />
+              <Sparkles className="w-4 h-4 shrink-0" />
               <span>
-                Pierwsze uruchomienie czystej instancji · Przejęcie roli Administratora
+                Kreator Startowy Administratora · Czysta Instancja (0 Sekretów w Kodzie)
               </span>
             </div>
             <h1 className="text-xl font-bold font-display text-[var(--vault-text)]">
-              Zainicjuj Pierwszy Skarbiec na tym urządzeniu
+              Zainstaluj aplikację i zainicjuj Pierwszy Skarbiec
             </h1>
             <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
-              Pobrałeś czystą aplikację bez żadnych danych prywatnych i bez przypisanych kont. Osoba, która jako pierwsza uruchomi i zainicjuje skarbiec poniżej, staje się <strong>Głównym Administratorem</strong> tej instancji, otwiera lokalny skarbiec oraz podpina zaszyfrowany plik kopii <code className="font-mono">AES-256-GCM</code> na swoim dysku Google Drive.
+              Uruchomiłeś czystą aplikację online (np. z linku GitHub Pages). Nie musisz szukać ani wyciągać żadnych sekretów API — możesz od razu zainstalować aplikację lokalnie i utworzyć skarbiec <strong>przez Google</strong> lub <strong>bezpośrednio na tym urządzeniu</strong>.
             </p>
           </div>
 
-          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-1.5 text-xs text-[var(--vault-muted)]">
-            <div className="font-semibold text-[var(--vault-text)]">
-              Jak będzie wyglądało dodawanie rodziny po inicjalizacji?
+          {/* KROK 1: INSTALACJA LOKALNA PWA */}
+          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1 min-w-0">
+              <div className="text-xs font-semibold text-[var(--vault-text)] flex items-center gap-1.5">
+                <Smartphone className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
+                <span>Krok 1: Zainstaluj aplikację lokalnie na telefonie / komputerze</span>
+              </div>
+              <p className="text-[11px] text-[var(--vault-muted)]">
+                Dodaj ikonę FamilyStream Vault na pulpit lub ekran główny, aby korzystać z izolowanego certyfikatu sprzętowego PWA.
+              </p>
             </div>
-            <ol className="list-decimal list-inside space-y-1">
-              <li>
-                Ty (jako Pierwszy Administrator) tworzysz w panelu <strong>link zaproszeniowy</strong> dla domownika.
-              </li>
-              <li>
-                Domownik otwiera link, wpisuje swoje <strong>Imię i nazwisko</strong> oraz klika <strong>„Załóż mi konto”</strong>.
-              </li>
-              <li>
-                Ty (lub wyznaczony przez Ciebie Zaufany Opiekun, np. brat) zatwierdzasz konto jednym kliknięciem.
-              </li>
-            </ol>
+            <button
+              type="button"
+              onClick={onInstallPWA}
+              className="inline-flex items-center justify-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer shrink-0"
+            >
+              <Download className="w-3.5 h-3.5 shrink-0" />
+              <span>
+                {isPWAInstalled || detectedDevice.clientMode === 'pwa'
+                  ? 'Aplikacja PWA zainstalowana'
+                  : 'Zainstaluj lokalnie (PWA)'}
+              </span>
+            </button>
+          </div>
+
+          {/* KROK 2: DANE KONTA ADMINISTRATORA (BEZ WYCIĄGANIA SEKRETÓW) */}
+          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-3">
+            <div className="text-xs font-semibold text-[var(--vault-text)]">
+              Krok 2: Twoje konto Głównego Administratora (login: <code className="font-mono text-[var(--vault-accent)]">admin</code>)
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
+                  Twój e-mail Google (do identyfikacji Admina)
+                </label>
+                <input
+                  type="email"
+                  value={adminEmailInput}
+                  onChange={(e) => setAdminEmailInput(e.target.value)}
+                  placeholder="np. twoj.email@gmail.com"
+                  className="w-full px-3 py-2 text-xs rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
+                  Hasło główne Admina (opcjonalnie, min. 4 znaki)
+                </label>
+                <input
+                  type="password"
+                  value={adminMasterPasswordInput}
+                  onChange={(e) => setAdminMasterPasswordInput(e.target.value)}
+                  placeholder="Ułatwia logowanie hasłem..."
+                  className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+                />
+              </div>
+            </div>
           </div>
 
           {errorMsg && (
-            <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)]">
+            <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
               {errorMsg}
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleAdminClick}
-            disabled={isAdminLoading}
-            className="gsi-material-button !w-full"
-          >
-            <div className="gsi-material-button-content-wrapper">
-              <div className="gsi-material-button-icon">
-                <svg
-                  version="1.1"
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 48 48"
-                  style={{ display: 'block' }}
-                >
-                  <path
-                    fill="#EA4335"
-                    d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                  ></path>
-                  <path
-                    fill="#4285F4"
-                    d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                  ></path>
-                  <path
-                    fill="#FBBC05"
-                    d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                  ></path>
-                  <path
-                    fill="#34A853"
-                    d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                  ></path>
-                  <path fill="none" d="M0 0h48v48H0z"></path>
-                </svg>
+          {/* KROK 3: OBA TRYBY STARTU (GOOGLE + LOKALNY BEZ KLUCZY) */}
+          <div className="space-y-2.5">
+            <button
+              type="button"
+              onClick={() => handleAdminClick(false)}
+              disabled={isAdminLoading}
+              className="gsi-material-button !w-full"
+            >
+              <div className="gsi-material-button-content-wrapper">
+                <div className="gsi-material-button-icon">
+                  <svg
+                    version="1.1"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 48 48"
+                    style={{ display: 'block' }}
+                  >
+                    <path
+                      fill="#EA4335"
+                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                    ></path>
+                    <path
+                      fill="#4285F4"
+                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                    ></path>
+                    <path
+                      fill="#FBBC05"
+                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                    ></path>
+                    <path
+                      fill="#34A853"
+                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                    ></path>
+                    <path fill="none" d="M0 0h48v48H0z"></path>
+                  </svg>
+                </div>
+                <span className="gsi-material-button-contents">
+                  {isAdminLoading
+                    ? 'Tworzenie skarbca i łączenie...'
+                    : 'Zostań Pierwszym Administratorem i utwórz skarbiec (Google)'}
+                </span>
               </div>
-              <span className="gsi-material-button-contents">
-                {isAdminLoading
-                  ? 'Tworzenie skarbca i łączenie z Google Drive...'
-                  : 'Zostań Pierwszym Administratorem i utwórz skarbiec (Google)'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleAdminClick(true)}
+              disabled={isAdminLoading}
+              className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer text-center leading-snug"
+            >
+              <ShieldCheck className="w-4 h-4 shrink-0" />
+              <span>
+                Szybki Start Lokalny: Utwórz skarbiec od razu na tym urządzeniu (Bez kluczy i sekretów)
               </span>
-            </div>
-          </button>
+            </button>
+          </div>
+
+          {/* OPCJONALNE PODŁĄCZENIE WŁASNEGO GOOGLE CLOUD CLIENT ID */}
+          <div className="pt-2 border-t border-[var(--vault-border)] space-y-2 text-xs">
+            <button
+              type="button"
+              onClick={() => setShowOptionalOAuthConfig((v) => !v)}
+              className="text-[11px] text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
+            >
+              {showOptionalOAuthConfig
+                ? 'Ukryj opcjonalną konfigurację Google Cloud OAuth Client ID'
+                : 'Opcjonalnie dla zaawansowanych: Wklej własny Google OAuth Client ID (automatyczny Drive API)'}
+            </button>
+
+            {showOptionalOAuthConfig && (
+              <div className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
+                <p className="text-[11px] text-[var(--vault-muted)]">
+                  To pole jest <strong>całkowicie opcjonalne</strong>. Skarbiec oraz kopie zapasowe <code>.vault.enc</code> działają bez niego.
+                </p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <input
+                    type="text"
+                    value={customOAuthClientId}
+                    onChange={(e) => setCustomOAuthClientId(e.target.value)}
+                    placeholder="np. 123456-abc.apps.googleusercontent.com"
+                    className="flex-1 px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] min-w-0"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveOptionalClientId}
+                    className="px-3 py-1.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
+                  >
+                    Zapisz Client ID
+                  </button>
+                </div>
+                {oauthSavedMsg && (
+                  <div className="text-[11px] text-[var(--vault-success)]">
+                    {oauthSavedMsg}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       ) : null}
 
@@ -1006,7 +1149,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
 
             <button
               type="button"
-              onClick={handleAdminClick}
+              onClick={() => handleAdminClick(false)}
               disabled={isAdminLoading || isFamilyLoading}
               className="gsi-material-button !w-full"
             >

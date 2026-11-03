@@ -369,14 +369,14 @@ export const AdminTab3ConfigAndBackup: React.FC<
             />
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
             <button
               type="button"
               disabled={isProcessingBackup}
               onClick={() => handleExportDriveClick()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer text-left leading-snug"
             >
-              <CloudUpload className="w-4 h-4" />
+              <CloudUpload className="w-4 h-4 shrink-0" />
               <span>Eksportuj .vault.enc na Google Drive</span>
             </button>
 
@@ -384,14 +384,14 @@ export const AdminTab3ConfigAndBackup: React.FC<
               type="button"
               disabled={isProcessingBackup}
               onClick={handleLocalExportClick}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer text-left leading-snug"
             >
-              <Download className="w-4 h-4" />
+              <Download className="w-4 h-4 shrink-0" />
               <span>Pobierz .vault.enc lokalnie</span>
             </button>
 
-            <label className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer whitespace-nowrap">
-              <Upload className="w-4 h-4" />
+            <label className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer text-left leading-snug">
+              <Upload className="w-4 h-4 shrink-0" />
               <span>Wczytaj z pliku .vault.enc</span>
               <input
                 type="file"
