@@ -835,79 +835,205 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     setManualInviteInput('');
   };
 
-  const renderGoogleOAuthClientSetupBox = () => (
-    <div className="pt-2 border-t border-[var(--vault-border)] space-y-2 text-xs">
-      <button
-        type="button"
-        onClick={() => setShowOptionalOAuthConfig((v) => !v)}
-        className="text-[11px] text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
-      >
-        {showOptionalOAuthConfig
-          ? 'Ukryj konfigurację identyfikatora Google OAuth Client ID'
-          : 'Konfiguracja Google OAuth Client ID (do okna „Wybierz konto Google” i Google Drive)'}
-      </button>
+  const renderGoogleOAuthClientSetupBox = () => {
+    const hasConfiguredId = Boolean(customOAuthClientId.trim());
+    return (
+      <div className="pt-3 border-t border-[var(--vault-border)] space-y-3 text-xs">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setShowOptionalOAuthConfig((v) => !v)}
+            className="inline-flex items-center gap-1.5 text-xs text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer text-left"
+          >
+            <KeyRound className="w-3.5 h-3.5 shrink-0" />
+            <span>
+              {showOptionalOAuthConfig
+                ? 'Ukryj instrukcję i konfigurację Google OAuth Client ID'
+                : 'Skąd wziąć Google OAuth Client ID? (Instrukcja krok po kroku + Wklejenie ID)'}
+            </span>
+          </button>
 
-      {showOptionalOAuthConfig && (
-        <div className="p-3.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2.5">
-          <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
-            Aby przeglądarka otwierała oficjalne okno wyboru konta Google (<code>accounts.google.com</code>) oraz synchronizowała plik <code>FamilyStreamVault_AutoSync.vault.enc</code> na Twoim Google Drive, wklej publiczny identyfikator <strong>Google OAuth Client ID</strong> (typ: <em>Web application</em>).
-          </p>
-
-          {currentOrigin && (
-            <div className="p-2.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-[10px] text-[var(--vault-muted)]">
-                  Authorized JavaScript origin (wklej w Google Cloud Console):
-                </div>
-                <div className="text-xs font-mono font-semibold text-[var(--vault-accent)] truncate">
-                  {currentOrigin}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={handleCopyOrigin}
-                className="inline-flex items-center justify-center gap-1 px-2.5 py-1.5 text-[11px] font-semibold text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-bg)] hover:bg-[var(--vault-surface-hover)] rounded-md cursor-pointer shrink-0"
-              >
-                {copiedOrigin ? (
-                  <>
-                    <Check className="w-3 h-3 text-[var(--vault-success)]" />
-                    <span>Skopiowano</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3 h-3 text-[var(--vault-accent)]" />
-                    <span>Kopiuj Origin</span>
-                  </>
-                )}
-              </button>
-            </div>
-          )}
-
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={customOAuthClientId}
-              onChange={(e) => setCustomOAuthClientId(e.target.value)}
-              placeholder="np. 123456-abc.apps.googleusercontent.com"
-              className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] min-w-0"
-            />
-            <button
-              type="button"
-              onClick={handleSaveOptionalClientId}
-              className="px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer shrink-0"
-            >
-              Zapisz Client ID
-            </button>
-          </div>
-          {oauthSavedMsg && (
-            <div className="text-[11px] text-[var(--vault-success)]">
-              {oauthSavedMsg}
-            </div>
-          )}
+          <span
+            className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
+              hasConfiguredId
+                ? 'border-[var(--vault-success)] text-[var(--vault-success)]'
+                : 'border-[var(--vault-warning)] text-[var(--vault-warning)]'
+            }`}
+          >
+            {hasConfiguredId ? 'Client ID: Aktywny' : 'Brak Client ID'}
+          </span>
         </div>
-      )}
-    </div>
-  );
+
+        {(showOptionalOAuthConfig || !hasConfiguredId) && (
+          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-4">
+            <div className="space-y-1.5">
+              <div className="font-semibold text-[var(--vault-text)]">
+                Dlaczego podajesz własny Google OAuth Client ID?
+              </div>
+              <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
+                <strong>Client ID</strong> (kończący się na <code>.apps.googleusercontent.com</code>) to publiczny identyfikator Twojej własnej instancji skarbca. Pozwala przeglądarce wyświetlić oficjalne okno <strong>„Wybierz konto Google”</strong> i zapisać zaszyfrowany plik <code>FamilyStreamVault_AutoSync.vault.enc</code> bezpośrednio na Twoim prywatnym Google Drive — bez udziału obcych serwerów. Konfiguruje go <strong>tylko raz Główny Administrator</strong>.
+              </p>
+            </div>
+
+            {/* STEP-BY-STEP GUIDE FOR USERS */}
+            <div className="p-3.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-3">
+              <div className="text-xs font-bold text-[var(--vault-text)]">
+                Instrukcja krok po kroku: Jak wyciągnąć swój Client ID z ustawień Google (2 minuty)
+              </div>
+
+              <ol className="list-decimal list-inside space-y-2.5 text-[11px] text-[var(--vault-muted)] leading-relaxed">
+                <li>
+                  <strong className="text-[var(--vault-text)]">
+                    Utwórz projekt w konsoli Google:
+                  </strong>{' '}
+                  Otwórz w przeglądarce stronę{' '}
+                  <a
+                    href="https://console.cloud.google.com/projectcreate"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[var(--vault-accent)] underline font-mono break-all"
+                  >
+                    console.cloud.google.com/projectcreate
+                  </a>
+                  , zaloguj się na swoje konto Google, wpisz dowolną nazwę (np.{' '}
+                  <code>FamilyStream Vault</code>) i kliknij <strong>Create (Utwórz)</strong>.
+                </li>
+
+                <li>
+                  <strong className="text-[var(--vault-text)]">
+                    Włącz obsługę Google Drive API:
+                  </strong>{' '}
+                  Przejdź do{' '}
+                  <a
+                    href="https://console.cloud.google.com/apis/library/drive.googleapis.com"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[var(--vault-accent)] underline font-mono break-all"
+                  >
+                    console.cloud.google.com/apis/library/drive.googleapis.com
+                  </a>{' '}
+                  i kliknij niebieski przycisk <strong>Enable (Włącz)</strong>, aby skarbiec mógł zapisywać zaszyfrowany plik kopii na Twoim Dysku Google.
+                </li>
+
+                <li>
+                  <strong className="text-[var(--vault-text)]">
+                    Skonfiguruj ekran zgody (OAuth consent screen):
+                  </strong>{' '}
+                  Otwórz{' '}
+                  <a
+                    href="https://console.cloud.google.com/apis/credentials/consent"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[var(--vault-accent)] underline font-mono break-all"
+                  >
+                    console.cloud.google.com/apis/credentials/consent
+                  </a>
+                  :
+                  <ul className="list-disc list-inside pl-3 mt-1 space-y-1">
+                    <li>
+                      Wybierz typ użytkowników <strong>External (Zewnętrzni)</strong> i kliknij <strong>Create</strong>.
+                    </li>
+                    <li>
+                      Wpisz nazwę aplikacji (np. <code>FamilyStream Vault</code>), wybierz swój adres e-mail w polach kontaktowych i zapisz.
+                    </li>
+                    <li>
+                      W zakładce <strong>Audience (Odbiorcy)</strong> kliknij <strong>Publish App (Opublikuj aplikację)</strong> lub dodaj swój adres Gmail na listę <strong>Test users</strong>.
+                    </li>
+                  </ul>
+                </li>
+
+                <li>
+                  <strong className="text-[var(--vault-text)]">
+                    Wygeneruj i skopiuj OAuth Client ID:
+                  </strong>{' '}
+                  Wejdź na{' '}
+                  <a
+                    href="https://console.cloud.google.com/apis/credentials/oauthclient"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[var(--vault-accent)] underline font-mono break-all"
+                  >
+                    console.cloud.google.com/apis/credentials/oauthclient
+                  </a>
+                  :
+                  <ul className="list-disc list-inside pl-3 mt-1 space-y-1">
+                    <li>
+                      Jako <strong>Application type (Typ aplikacji)</strong> wybierz <strong>Web application (Aplikacja internetowa)</strong>.
+                    </li>
+                    <li>
+                      W sekcji <strong>Authorized JavaScript origins (Autoryzowane źródła JavaScript)</strong> kliknij <strong>+ Add URI</strong> i wklej poniższy adres domeny głównej (<strong>ważne:</strong> bez ukośnika <code>/</code> i bez <code>/hasla</code> na końcu!):
+                    </li>
+                  </ul>
+                </li>
+              </ol>
+
+              {currentOrigin && (
+                <div className="p-2.5 rounded-lg border border-[var(--vault-accent)] bg-[var(--vault-bg)] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-[10px] text-[var(--vault-muted)]">
+                      Adres do wklejenia w polu „Authorized JavaScript origins”:
+                    </div>
+                    <div className="text-xs font-mono font-bold text-[var(--vault-accent)] break-all">
+                      {currentOrigin}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCopyOrigin}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-md cursor-pointer shrink-0"
+                  >
+                    {copiedOrigin ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Skopiowano adres!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Kopiuj Origin</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+
+              <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
+                Po kliknięciu <strong>Create</strong> w konsoli Google pojawi się okienko z Twoim identyfikatorem <strong>Client ID</strong> (np. <code>123456789-abc...apps.googleusercontent.com</code>). Skopiuj go i wklej poniżej:
+              </p>
+            </div>
+
+            {/* INPUT FIELD FOR CLIENT ID */}
+            <div className="space-y-2">
+              <label className="block text-[11px] font-semibold text-[var(--vault-text)]">
+                Wklej tutaj swój identyfikator Google OAuth Client ID:
+              </label>
+              <div className="flex flex-col sm:flex-row gap-2">
+                <input
+                  type="text"
+                  value={customOAuthClientId}
+                  onChange={(e) => setCustomOAuthClientId(e.target.value)}
+                  placeholder="np. 1234567890-abcdefg.apps.googleusercontent.com"
+                  className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)] min-w-0"
+                />
+                <button
+                  type="button"
+                  onClick={handleSaveOptionalClientId}
+                  className="px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer shrink-0"
+                >
+                  Zapisz Client ID
+                </button>
+              </div>
+              {oauthSavedMsg && (
+                <div className="text-[11px] font-medium text-[var(--vault-success)]">
+                  {oauthSavedMsg}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="max-w-lg mx-auto my-4 space-y-6">
