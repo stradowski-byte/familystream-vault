@@ -13,7 +13,13 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { auth, db, isFirebaseConfigured } from './firebase';
+import { onAuthStateChanged } from 'firebase/auth';
+import {
+  auth,
+  db,
+  ensureFirebaseAuthSession,
+  isFirebaseConfigured,
+} from './firebase';
 import {
   decryptPrivateRecordPayload,
   encryptPrivateRecordPayload,
@@ -177,19 +183,23 @@ export interface RealtimeVaultSnapshotCallbacks {
 
 /**
  * Real-time `onSnapshot` listener for all FamilyStream Vault collections in Cloud Firestore.
+ * Strictly waits for an active `request.auth` session (`auth.currentUser != null`) before
+ * attaching Firestore listeners so unauthenticated clients never trigger permission errors.
  */
 export function subscribeToVaultFirestoreRealtime(
   callbacks: RealtimeVaultSnapshotCallbacks
 ): Unsubscribe {
-  if (!isFirebaseConfigured() || !db) {
+  if (!isFirebaseConfigured() || !db || !auth) {
     callbacks.onInitialSyncComplete?.();
     return () => {};
   }
 
-  const unsubscribers: Unsubscribe[] = [];
+  let snapshotUnsubscribers: Unsubscribe[] = [];
+  let attachedUid: string | null = null;
   let initialConfigLoaded = false;
   let initialMembersLoaded = false;
   let notifiedInitial = false;
+  let isDisposed = false;
 
   const checkInitialComplete = () => {
     if (!notifiedInitial && initialConfigLoaded && initialMembersLoaded) {
@@ -198,115 +208,172 @@ export function subscribeToVaultFirestoreRealtime(
     }
   };
 
-  // 1. /vaultConfig/default
-  unsubscribers.push(
-    onSnapshot(
-      doc(db, 'vaultConfig', 'default'),
-      (snap) => {
-        callbacks.onVaultConfig(
-          snap.exists() ? (snap.data() as VaultConfig) : null
-        );
-        initialConfigLoaded = true;
-        checkInitialComplete();
-      },
-      (err) => {
-        initialConfigLoaded = true;
-        checkInitialComplete();
-        handleFirestoreError(err, OperationType.GET, 'vaultConfig/default');
-      }
-    )
-  );
+  const detachSnapshots = () => {
+    snapshotUnsubscribers.forEach((u) => u());
+    snapshotUnsubscribers = [];
+    attachedUid = null;
+  };
 
-  // 2. /members
-  unsubscribers.push(
-    onSnapshot(
-      collection(db, 'members'),
-      (snap) => {
-        const list = snap.docs.map((d) => ({
-          ...(d.data() as Member),
-          id: d.id,
-        }));
-        callbacks.onMembers(list);
-        initialMembersLoaded = true;
-        checkInitialComplete();
-      },
-      (err) => {
-        initialMembersLoaded = true;
-        checkInitialComplete();
-        handleFirestoreError(err, OperationType.LIST, 'members');
-      }
-    )
-  );
+  const attachSnapshotsForUser = (uid: string) => {
+    if (isDisposed || attachedUid === uid) return;
+    detachSnapshots();
+    attachedUid = uid;
 
-  // 3. /devices
-  unsubscribers.push(
-    onSnapshot(
-      collection(db, 'devices'),
-      (snap) => {
-        const list = snap.docs.map((d) =>
-          ensureDeviceHardwareCertificate({
-            ...(d.data() as Device),
+    // 1. /vaultConfig/default
+    snapshotUnsubscribers.push(
+      onSnapshot(
+        doc(db, 'vaultConfig', 'default'),
+        (snap) => {
+          callbacks.onVaultConfig(
+            snap.exists() ? (snap.data() as VaultConfig) : null
+          );
+          initialConfigLoaded = true;
+          checkInitialComplete();
+        },
+        (err) => {
+          initialConfigLoaded = true;
+          checkInitialComplete();
+          if (auth.currentUser) {
+            handleFirestoreError(err, OperationType.GET, 'vaultConfig/default');
+          }
+        }
+      )
+    );
+
+    // 2. /members
+    snapshotUnsubscribers.push(
+      onSnapshot(
+        collection(db, 'members'),
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            ...(d.data() as Member),
             id: d.id,
-          })
-        );
-        callbacks.onDevices(list);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'devices')
-    )
-  );
+          }));
+          callbacks.onMembers(list);
+          initialMembersLoaded = true;
+          checkInitialComplete();
+        },
+        (err) => {
+          initialMembersLoaded = true;
+          checkInitialComplete();
+          if (auth.currentUser) {
+            handleFirestoreError(err, OperationType.LIST, 'members');
+          }
+        }
+      )
+    );
 
-  // 4. /passwords (E2E AES-256-GCM encrypted records)
-  unsubscribers.push(
-    onSnapshot(
-      collection(db, 'passwords'),
-      (snap) => {
-        const list = snap.docs.map((d) => ({
-          ...(d.data() as PasswordRecord),
-          id: d.id,
-        }));
-        callbacks.onPasswords(list);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'passwords')
-    )
-  );
+    // 3. /devices
+    snapshotUnsubscribers.push(
+      onSnapshot(
+        collection(db, 'devices'),
+        (snap) => {
+          const list = snap.docs.map((d) =>
+            ensureDeviceHardwareCertificate({
+              ...(d.data() as Device),
+              id: d.id,
+            })
+          );
+          callbacks.onDevices(list);
+        },
+        (err) => {
+          if (auth.currentUser) {
+            handleFirestoreError(err, OperationType.LIST, 'devices');
+          }
+        }
+      )
+    );
 
-  // 5. /invitations
-  unsubscribers.push(
-    onSnapshot(
-      collection(db, 'invitations'),
-      (snap) => {
-        const list = snap.docs.map((d) => ({
-          ...(d.data() as VaultInvitation),
-          id: d.id,
-        }));
-        callbacks.onInvitations(normalizeInvitationStatuses(list));
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'invitations')
-    )
-  );
+    // 4. /passwords (E2E AES-256-GCM encrypted records)
+    snapshotUnsubscribers.push(
+      onSnapshot(
+        collection(db, 'passwords'),
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            ...(d.data() as PasswordRecord),
+            id: d.id,
+          }));
+          callbacks.onPasswords(list);
+        },
+        (err) => {
+          if (auth.currentUser) {
+            handleFirestoreError(err, OperationType.LIST, 'passwords');
+          }
+        }
+      )
+    );
 
-  // 6. /activityLogs
-  const logsQuery = query(
-    collection(db, 'activityLogs'),
-    orderBy('timestamp', 'desc'),
-    limit(150)
-  );
-  unsubscribers.push(
-    onSnapshot(
-      logsQuery,
-      (snap) => {
-        const list = snap.docs.map((d) => ({
-          ...(d.data() as ActivityLog),
-          id: d.id,
-        }));
-        callbacks.onActivityLogs(list);
-      },
-      (err) => handleFirestoreError(err, OperationType.LIST, 'activityLogs')
-    )
-  );
+    // 5. /invitations
+    snapshotUnsubscribers.push(
+      onSnapshot(
+        collection(db, 'invitations'),
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            ...(d.data() as VaultInvitation),
+            id: d.id,
+          }));
+          callbacks.onInvitations(normalizeInvitationStatuses(list));
+        },
+        (err) => {
+          if (auth.currentUser) {
+            handleFirestoreError(err, OperationType.LIST, 'invitations');
+          }
+        }
+      )
+    );
+
+    // 6. /activityLogs
+    const logsQuery = query(
+      collection(db, 'activityLogs'),
+      orderBy('timestamp', 'desc'),
+      limit(150)
+    );
+    snapshotUnsubscribers.push(
+      onSnapshot(
+        logsQuery,
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            ...(d.data() as ActivityLog),
+            id: d.id,
+          }));
+          callbacks.onActivityLogs(list);
+        },
+        (err) => {
+          if (auth.currentUser) {
+            handleFirestoreError(err, OperationType.LIST, 'activityLogs');
+          }
+        }
+      )
+    );
+  };
+
+  // Listen to Firebase Auth state changes (Google Auth or Anonymous Auth)
+  const unsubAuth = onAuthStateChanged(auth, (user) => {
+    if (isDisposed) return;
+    if (user) {
+      attachSnapshotsForUser(user.uid);
+    } else {
+      detachSnapshots();
+    }
+  });
+
+  // Ensure an active Firebase Auth session (reuses Google session or creates Anonymous session)
+  void ensureFirebaseAuthSession(false).then((user) => {
+    if (isDisposed) return;
+    if (user) {
+      attachSnapshotsForUser(user.uid);
+    } else {
+      // If no session could be established yet (e.g., waiting for Admin Google Login), allow UI to render
+      initialConfigLoaded = true;
+      initialMembersLoaded = true;
+      checkInitialComplete();
+    }
+  });
 
   return () => {
-    unsubscribers.forEach((u) => u());
+    isDisposed = true;
+    unsubAuth();
+    detachSnapshots();
   };
 }
 
@@ -325,6 +392,9 @@ export async function savePasswordToFirestore(
 ): Promise<void> {
   const path = `passwords/${passwordId}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
+
     const existingSnap = await getDoc(doc(db, 'passwords', passwordId));
     const base = existingSnap.exists()
       ? (existingSnap.data() as PasswordRecord)
@@ -411,6 +481,8 @@ export async function deletePasswordFromFirestore(
 ): Promise<void> {
   const path = `passwords/${passwordId}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
     await deleteDoc(doc(db, 'passwords', passwordId));
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, path);
@@ -422,9 +494,12 @@ export async function saveVaultConfigToFirestore(
 ): Promise<void> {
   const path = 'vaultConfig/default';
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
+
     const cleanConfig: VaultConfig = {
       initialized: Boolean(config.initialized),
-      adminUid: (config.adminUid || 'admin').slice(0, 125),
+      adminUid: (config.adminUid || user.uid || 'admin').slice(0, 125),
       adminEmail: (config.adminEmail || 'admin@familystream.local').slice(
         0,
         250
@@ -456,6 +531,9 @@ export async function saveMemberToFirestore(
 ): Promise<void> {
   const path = `members/${memberId}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
+
     const existingSnap = await getDoc(doc(db, 'members', memberId));
     const base = existingSnap.exists()
       ? (existingSnap.data() as Member)
@@ -479,7 +557,12 @@ export async function saveMemberToFirestore(
         memberData.mergedVaultKeysJson ?? base.mergedVaultKeysJson ?? '[]',
       role: memberData.role ?? base.role ?? 'member',
       status: memberData.status ?? base.status ?? 'pending',
-      googleUid: (memberData.googleUid ?? base.googleUid ?? '').slice(0, 250),
+      googleUid: (
+        memberData.googleUid ??
+        base.googleUid ??
+        user.uid ??
+        ''
+      ).slice(0, 250),
       createdAt: memberData.createdAt || base.createdAt || now,
       updatedAt: memberData.updatedAt || now,
     });
@@ -494,6 +577,8 @@ export async function deleteMemberFromFirestore(
 ): Promise<void> {
   const path = `members/${memberId}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
     await deleteDoc(doc(db, 'members', memberId));
     const devSnaps = await getDocs(
       query(collection(db, 'devices'), where('memberId', '==', memberId))
@@ -511,12 +596,37 @@ export async function saveDeviceToFirestore(
   deviceData: Partial<Device>
 ): Promise<Device> {
   const path = `devices/${deviceId}`;
+  const now = new Date().toISOString();
+  const fallbackMerged: Device = ensureDeviceHardwareCertificate(
+    stripUndefinedFields({
+      ...(deviceData as Device),
+      id: deviceId,
+      memberId: deviceData.memberId ?? '',
+      memberName: (deviceData.memberName ?? '').slice(0, 115),
+      username: (deviceData.username ?? '').slice(0, 75),
+      deviceFingerprint: (deviceData.deviceFingerprint ?? '').slice(0, 250),
+      deviceName: (deviceData.deviceName ?? '').slice(0, 195),
+      customLabel: (deviceData.customLabel ?? '').slice(0, 195),
+      clientMode:
+        deviceData.clientMode === 'pwa'
+          ? ('pwa' as const)
+          : ('browser' as const),
+      status: deviceData.status ?? 'pending',
+      webAuthnCredentialId: deviceData.webAuthnCredentialId ?? '',
+      requestedAt: deviceData.requestedAt || now,
+      lastSeenAt: deviceData.lastSeenAt || now,
+    }),
+    false
+  );
+
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return fallbackMerged;
+
     const existingSnap = await getDoc(doc(db, 'devices', deviceId));
     const base = existingSnap.exists()
       ? (existingSnap.data() as Device)
       : ({} as Device);
-    const now = new Date().toISOString();
     const rawMerged: Device = stripUndefinedFields({
       ...base,
       ...deviceData,
@@ -564,6 +674,7 @@ export async function rebindDeviceCertificateInFirestore(
 ): Promise<Device> {
   const path = `devices/${deviceId}`;
   try {
+    await ensureFirebaseAuthSession(true);
     const snap = await getDoc(doc(db, 'devices', deviceId));
     if (!snap.exists()) {
       throw new Error('Nie znaleziono urządzenia w bazie Firestore.');
@@ -589,6 +700,8 @@ export async function deleteDeviceFromFirestore(
 ): Promise<void> {
   const path = `devices/${deviceId}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
     await deleteDoc(doc(db, 'devices', deviceId));
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, path);
@@ -635,6 +748,8 @@ export async function createInvitationInFirestore(params: {
 
   const path = `invitations/${invId}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return invitation;
     await setDoc(doc(db, 'invitations', invId), invitation);
     return invitation;
   } catch (err) {
@@ -648,6 +763,12 @@ export async function verifyInvitationTokenInFirestore(
   const cleanToken = token.trim();
   const path = 'invitations';
   try {
+    const user = await ensureFirebaseAuthSession(true);
+    if (!user) {
+      throw new Error(
+        'W projekcie Firebase nie jest jeszcze włączone logowanie „Anonymous” dla urządzeń domowników. Włącz je w Firebase Console -> Authentication -> Sign-in method -> Anonymous -> Enable.'
+      );
+    }
     const q = query(
       collection(db, 'invitations'),
       where('token', '==', cleanToken),
@@ -684,6 +805,12 @@ export async function consumeInvitationTokenInFirestore(
   const cleanToken = token.trim();
   const path = 'invitations';
   try {
+    const user = await ensureFirebaseAuthSession(true);
+    if (!user) {
+      throw new Error(
+        'W projekcie Firebase nie jest jeszcze włączone logowanie „Anonymous” dla urządzeń domowników. Włącz je w Firebase Console -> Authentication -> Sign-in method -> Anonymous -> Enable.'
+      );
+    }
     const q = query(
       collection(db, 'invitations'),
       where('token', '==', cleanToken),
@@ -706,6 +833,9 @@ export async function consumeInvitationTokenInFirestore(
     await setDoc(doc(db, 'invitations', inv.id), updated);
     return updated;
   } catch (err) {
+    if (err instanceof Error && !err.message.includes('permission')) {
+      throw err;
+    }
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
 }
@@ -715,6 +845,8 @@ export async function deleteInvitationFromFirestore(
 ): Promise<void> {
   const path = `invitations/${invitationId}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
     await deleteDoc(doc(db, 'invitations', invitationId));
   } catch (err) {
     handleFirestoreError(err, OperationType.DELETE, path);
@@ -726,6 +858,8 @@ export async function appendActivityLogToFirestore(
 ): Promise<void> {
   const path = `activityLogs/${entry.id}`;
   try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
     const cleanEntry: ActivityLog = {
       id: entry.id,
       actorId: (entry.actorId || 'system').slice(0, 120),

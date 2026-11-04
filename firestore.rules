@@ -17,6 +17,26 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email == 'stradowski@gmail.com' && request.auth.token.email_verified == true) ||
+        (exists(/databases/$(database)/documents/vaultConfig/default) &&
+         get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == request.auth.uid)
+      );
+    }
+
+    function isMemberOwner(memberId) {
+      return isSignedIn() && (
+        request.auth.uid == memberId ||
+        (exists(/databases/$(database)/documents/members/$(memberId)) &&
+         get(/databases/$(database)/documents/members/$(memberId)).data.googleUid == request.auth.uid)
+      );
+    }
+
     function isValidVaultConfig(data) {
       return data.keys().hasAll([
         'initialized',
@@ -283,51 +303,51 @@ service cloud.firestore {
     }
 
     match /vaultConfig/{configId} {
-      allow get: if isValidId(configId);
-      allow list: if request.time != null;
-      allow create: if isValidId(configId) && isValidVaultConfig(incoming());
-      allow update: if isValidId(configId) && isValidVaultConfig(incoming()) && incoming().createdAt == existing().createdAt;
-      allow delete: if isValidId(configId);
+      allow get: if isSignedIn() && isValidId(configId);
+      allow list: if isSignedIn() && request.time != null;
+      allow create: if isSignedIn() && isValidId(configId) && isValidVaultConfig(incoming());
+      allow update: if isSignedIn() && isValidId(configId) && isValidVaultConfig(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isSignedIn() && isValidId(configId) && (isAdmin() || existing().adminUid == request.auth.uid);
     }
 
     match /members/{memberId} {
-      allow get: if isValidId(memberId);
-      allow list: if request.time != null;
-      allow create: if isValidId(memberId) && isValidMember(incoming()) && incoming().id == memberId;
-      allow update: if isValidId(memberId) && isValidMember(incoming()) && incoming().id == existing().id;
-      allow delete: if isValidId(memberId);
+      allow get: if isSignedIn() && isValidId(memberId);
+      allow list: if isSignedIn() && request.time != null;
+      allow create: if isSignedIn() && isValidId(memberId) && isValidMember(incoming()) && incoming().id == memberId;
+      allow update: if isSignedIn() && isValidId(memberId) && isValidMember(incoming()) && incoming().id == existing().id;
+      allow delete: if isSignedIn() && isValidId(memberId) && (isAdmin() || existing().googleUid == request.auth.uid || existing().id == request.auth.uid);
     }
 
     match /devices/{deviceId} {
-      allow get: if isValidId(deviceId);
-      allow list: if request.time != null;
-      allow create: if isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == deviceId;
-      allow update: if isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == existing().id;
-      allow delete: if isValidId(deviceId);
+      allow get: if isSignedIn() && isValidId(deviceId);
+      allow list: if isSignedIn() && request.time != null;
+      allow create: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == deviceId;
+      allow update: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == existing().id;
+      allow delete: if isSignedIn() && isValidId(deviceId) && (isAdmin() || isMemberOwner(existing().memberId));
     }
 
     match /passwords/{passwordId} {
-      allow get: if isValidId(passwordId);
-      allow list: if request.time != null;
-      allow create: if isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == passwordId;
-      allow update: if isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == existing().id;
-      allow delete: if isValidId(passwordId);
+      allow get: if isSignedIn() && isValidId(passwordId);
+      allow list: if isSignedIn() && request.time != null;
+      allow create: if isSignedIn() && isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == passwordId;
+      allow update: if isSignedIn() && isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == existing().id;
+      allow delete: if isSignedIn() && isValidId(passwordId) && (isAdmin() || isMemberOwner(existing().ownerId));
     }
 
     match /invitations/{invitationId} {
-      allow get: if isValidId(invitationId);
-      allow list: if request.time != null;
-      allow create: if isValidId(invitationId) && isValidVaultInvitation(incoming()) && incoming().id == invitationId;
-      allow update: if isValidId(invitationId) && isValidVaultInvitation(incoming()) && incoming().id == existing().id;
-      allow delete: if isValidId(invitationId);
+      allow get: if isSignedIn() && isValidId(invitationId);
+      allow list: if isSignedIn() && request.time != null;
+      allow create: if isSignedIn() && isValidId(invitationId) && isValidVaultInvitation(incoming()) && incoming().id == invitationId;
+      allow update: if isSignedIn() && isValidId(invitationId) && isValidVaultInvitation(incoming()) && incoming().id == existing().id;
+      allow delete: if isSignedIn() && isValidId(invitationId) && (isAdmin() || isMemberOwner(existing().createdByMemberId));
     }
 
     match /activityLogs/{logId} {
-      allow get: if isValidId(logId);
-      allow list: if request.time != null;
-      allow create: if isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == logId;
-      allow update: if isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == existing().id;
-      allow delete: if isValidId(logId);
+      allow get: if isSignedIn() && isValidId(logId);
+      allow list: if isSignedIn() && request.time != null;
+      allow create: if isSignedIn() && isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == logId;
+      allow update: if isSignedIn() && isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == existing().id;
+      allow delete: if isSignedIn() && isValidId(logId) && isAdmin();
     }
   }
 }

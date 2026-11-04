@@ -292,9 +292,15 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   >(null);
   const [copiedDomainHost, setCopiedDomainHost] = useState(false);
 
-  // Native Firebase Auth user state (persisted via browserLocalPersistence)
+  // Native Firebase Auth Google user state (persisted via browserLocalPersistence)
   const [firebaseAuthUser, setFirebaseAuthUser] = useState<FirebaseUser | null>(
-    () => (isFirebaseConfigured() && auth ? auth.currentUser : null)
+    () =>
+      isFirebaseConfigured() &&
+      auth &&
+      auth.currentUser &&
+      !auth.currentUser.isAnonymous
+        ? auth.currentUser
+        : null
   );
   const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
   const [copiedCustomLink, setCopiedCustomLink] = useState(false);
@@ -308,7 +314,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   useEffect(() => {
     if (!firebaseReady || !auth) return;
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setFirebaseAuthUser(user);
+      setFirebaseAuthUser(user && !user.isAnonymous ? user : null);
     });
     return () => unsubscribe();
   }, [firebaseReady]);
@@ -994,7 +1000,12 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     setUnauthorizedDomainHost(null);
     setIsAdminLoading(true);
     try {
-      let userToUse = !forceAccountSelection ? auth.currentUser : null;
+      let userToUse =
+        !forceAccountSelection &&
+        auth.currentUser &&
+        !auth.currentUser.isAnonymous
+          ? auth.currentUser
+          : null;
       if (!userToUse) {
         if (forceAccountSelection) {
           googleProvider.setCustomParameters({ prompt: 'select_account' });

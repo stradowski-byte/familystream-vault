@@ -5,6 +5,8 @@ import {
   getAuth,
   GoogleAuthProvider,
   setPersistence,
+  signInAnonymously,
+  User as FirebaseUser,
 } from 'firebase/auth';
 import {
   doc,
@@ -360,9 +362,69 @@ export const FIREBASE_DATABASE_ID =
   initialConfig?.firestoreDatabaseId || '(default)';
 export const FIREBASE_AUTH_DOMAIN = initialConfig?.authDomain || '';
 
-export async function testFirestoreConnection(): Promise<void> {
-  if (!isFirebaseConfigured() || !db) return;
+let pendingAuthPromise: Promise<FirebaseUser | null> | null = null;
+
+export function isAnonymousAuthDisabledError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code || '';
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    code === 'auth/operation-not-allowed' ||
+    code === 'auth/admin-restricted-operation' ||
+    msg.includes('auth/operation-not-allowed') ||
+    msg.includes('auth/admin-restricted-operation')
+  );
+}
+
+/**
+ * Ensures the client has an active cryptographic `request.auth` session in Firebase Auth.
+ * - If the Admin is already signed in with Google (or a persisted Anonymous session exists), returns `auth.currentUser`.
+ * - Otherwise, automatically signs in with `signInAnonymously(auth)` so family member devices
+ *   obtain a persistent `request.auth.uid` bound to their member profile and hardware certificate.
+ */
+export async function ensureFirebaseAuthSession(
+  throwIfAnonymousDisabled = false
+): Promise<FirebaseUser | null> {
+  if (!isFirebaseConfigured() || !auth) return null;
+
   try {
+    await auth.authStateReady();
+  } catch {
+    // ignore authStateReady error
+  }
+
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
+  if (pendingAuthPromise) {
+    return pendingAuthPromise;
+  }
+
+  pendingAuthPromise = (async () => {
+    try {
+      const cred = await signInAnonymously(auth);
+      return cred.user;
+    } catch (err) {
+      if (throwIfAnonymousDisabled && isAnonymousAuthDisabledError(err)) {
+        const proj = getActiveFirebaseConfig()?.projectId || 'twoj-projekt';
+        throw new Error(
+          `W Twoim projekcie Firebase (${proj}) nie włączono jeszcze opcji „Anonymous” dla urządzeń domowników. Wejdź w Firebase Console -> Authentication -> Sign-in method -> Anonymous -> Enable i kliknij Save.`
+        );
+      }
+      return auth.currentUser;
+    } finally {
+      pendingAuthPromise = null;
+    }
+  })();
+
+  return pendingAuthPromise;
+}
+
+export async function testFirestoreConnection(): Promise<void> {
+  if (!isFirebaseConfigured() || !db || !auth) return;
+  try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) return;
     await getDocFromServer(doc(db, 'vaultConfig', 'default'));
   } catch (error) {
     if (

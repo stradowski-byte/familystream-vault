@@ -14,7 +14,11 @@ import {
   signOut,
   User as FirebaseUser,
 } from 'firebase/auth';
-import { auth, testFirestoreConnection } from './lib/firebase';
+import {
+  auth,
+  ensureFirebaseAuthSession,
+  testFirestoreConnection,
+} from './lib/firebase';
 import {
   appendActivityLogToFirestore,
   consumeInvitationTokenInFirestore,
@@ -240,9 +244,9 @@ export default function App() {
         // ignore storage errors
       }
 
-      // 2. Check native Firebase Auth user (browserLocalPersistence) for Primary Admin
+      // 2. Check native Firebase Auth Google user (browserLocalPersistence) for Primary Admin
       const fbUser = auth?.currentUser;
-      if (fbUser) {
+      if (fbUser && !fbUser.isAnonymous) {
         const adminMember = members.find(
           (m) =>
             m.googleUid === fbUser.uid ||
@@ -750,6 +754,9 @@ export default function App() {
     username: string,
     password: string
   ) => {
+    const fbSessionUser = await ensureFirebaseAuthSession(true);
+    const activeAuthUid = fbSessionUser?.uid || auth?.currentUser?.uid || '';
+
     const member = members.find(
       (m) =>
         m.username.toLowerCase() === username.toLowerCase() &&
@@ -766,6 +773,19 @@ export default function App() {
       throw new Error(
         'Nieprawidłowe hasło. Jeśli zapomniałeś hasła (np. Mama), zadzwoń do Administratora lub Zaufanego Opiekuna (np. Brata) po reset hasła lub link ratunkowy.'
       );
+    }
+
+    // Bind current Firebase Auth UID (Anonymous Auth bound to device) to member.googleUid for Firestore Security Rules ownership verification
+    if (
+      activeAuthUid &&
+      member.role !== 'admin' &&
+      member.googleUid !== activeAuthUid
+    ) {
+      await saveMemberToFirestore(member.id, {
+        ...member,
+        googleUid: activeAuthUid,
+        updatedAt: new Date().toISOString(),
+      });
     }
 
     let mergedDeks: string[] = [];
@@ -1029,6 +1049,9 @@ export default function App() {
       }
     }
 
+    const fbSessionUser = await ensureFirebaseAuthSession(true);
+    const boundAuthUid = fbSessionUser?.uid || auth?.currentUser?.uid || '';
+
     const newMember: Member = {
       id: memberId,
       fullName: params.fullName,
@@ -1040,7 +1063,7 @@ export default function App() {
       mergedVaultKeysJson: '[]',
       role: 'member',
       status: 'pending',
-      googleUid: '',
+      googleUid: boundAuthUid,
       invitedByToken: params.inviteToken,
       createdAt: now,
       updatedAt: now,
@@ -1131,12 +1154,20 @@ export default function App() {
       targetMember.pbkdf2Salt
     );
 
+    const fbSessionUser = await ensureFirebaseAuthSession(true);
+    const boundAuthUid =
+      fbSessionUser?.uid ||
+      auth?.currentUser?.uid ||
+      targetMember.googleUid ||
+      '';
+
     const now = new Date().toISOString();
     const updatedMember: Member = {
       ...targetMember,
       username: params.newUsername,
       passwordHash: newPasswordHash,
       wrappedMasterKey: newWrappedMasterKey,
+      googleUid: boundAuthUid,
       status: 'active',
       updatedAt: now,
     };
@@ -2240,8 +2271,10 @@ export default function App() {
           } catch {
       // ignore
     }
-    if (auth) {
+    // Sign out of Google Auth if logged in as a non-anonymous user; preserve anonymous device UID for family member hardware certificate binding
+    if (auth && auth.currentUser && !auth.currentUser.isAnonymous) {
       await signOut(auth).catch(() => {});
+      void ensureFirebaseAuthSession(false);
     }
     setCurrentMemberId(null);
     setActiveDekBase64(null);

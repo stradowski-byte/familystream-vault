@@ -92,11 +92,20 @@ export const FirebaseSetupGuideDropdown: React.FC<
               </li>
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Włącz logowanie Google i autoryzuj domenę GitHub Pages:
+                  Włącz logowanie Google + Anonymous oraz autoryzuj domenę GitHub Pages:
                 </strong>{' '}
                 W menu po lewej stronie wybierz{' '}
                 <strong>Build → Authentication → Get started</strong>. W zakładce{' '}
-                <strong>Sign-in method</strong> kliknij <strong>Google</strong>, przełącz na <strong>Enable</strong>, wybierz swój adres e-mail wsparcia i kliknij <strong>Save</strong>. Następnie wejdź w zakładkę{' '}
+                <strong>Sign-in method</strong> włącz dwie metody:
+                <ul className="list-disc list-inside pl-3 mt-1 space-y-1">
+                  <li>
+                    <strong>Google</strong> (dla Głównego Administratora) — przełącz na <strong>Enable</strong>, wybierz adres e-mail wsparcia i kliknij <strong>Save</strong>.
+                  </li>
+                  <li>
+                    <strong>Anonymous</strong> (dla urządzeń Domowników powiązanych z Certyfikatem Sprzętowym, aby reguły <code>firestore.rules</code> mogły wymagać <code>request.auth != null</code> bez zmuszania rodziny do logowania przez Google) — kliknij <strong>Add new provider → Anonymous → Enable → Save</strong>.
+                  </li>
+                </ul>
+                Następnie wejdź w zakładkę{' '}
                 <strong>Settings → Authorized domains → Add domain</strong> i dodaj domenę swojego GitHub Pages (np.{' '}
                 <code>twoj-login.github.io</code>).
               </li>
@@ -113,8 +122,8 @@ export const FirebaseSetupGuideDropdown: React.FC<
                   Wklej reguły bezpieczeństwa (<code>firestore.rules</code>):
                 </strong>{' '}
                 W widoku bazy Firestore przejdź do zakładki{' '}
-                <strong>Rules</strong>, wklej reguły z pliku{' '}
-                <code>firestore.rules</code> znajdującego się w repozytorium aplikacji i kliknij <strong>Publish</strong>.
+                <strong>Rules</strong>, wklej pancerne reguły z pliku{' '}
+                <code>firestore.rules</code> (wymagające jednocześnie <code>request.auth != null</code>, weryfikacji właściciela przy usuwaniu oraz walidacji schematu) i kliknij <strong>Publish</strong>.
               </li>
             </ol>
           </div>
@@ -130,11 +139,11 @@ export const FirebaseSetupGuideDropdown: React.FC<
                 <div className="font-bold text-[var(--vault-text)] flex items-center gap-1.5">
                   <KeyRound className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
                   <span>
-                    1. Moduł Firebase Authentication — Strażnik Tożsamości i Trwałej Sesji
+                    1. Moduł Firebase Authentication (<code>request.auth</code>) — Strażnik Tożsamości i Firewall Bazy
                   </span>
                 </div>
                 <p className="text-[11px] text-[var(--vault-muted)]">
-                  <strong>Po co nam on:</strong> Zastępuje dawne, nietrwałe tokeny OAuth. Odpowiada wyłącznie za bezpieczne zalogowanie Głównego Administratora przez konto Google (<code>signInWithPopup</code>) oraz natywne utrzymanie sesji w bazie przeglądarki (<code>browserLocalPersistence</code> w IndexedDB). Dzięki niemu zamknięcie aplikacji PWA na telefonie lub jej aktualizacja nie wylogowuje Cię i nie wymaga ponownego wybierania konta Google.
+                  <strong>Po co nam on:</strong> Generuje kryptograficzny token <code>request.auth</code> weryfikowany przez serwer Google przy każdym zapytaniu do bazy. <strong>Administrator</strong> otrzymuje token z logowania Google (<code>signInWithPopup</code>), natomiast <strong>urządzenia Domowników</strong> otrzymują w tle trwały token <code>Anonymous Auth</code> powiązany z ich kontem (<code>googleUid</code>) oraz Certyfikatem Sprzętowym. Dzięki temu reguły <code>firestore.rules</code> blokują każdą nieautoryzowaną próbę odczytu lub skasowania haseł z internetu (usuwać wpisy może wyłącznie ich właściciel lub Administrator).
                 </p>
               </div>
 
