@@ -114,6 +114,7 @@ export default function App() {
   const [theme, setTheme] = useState<ThemeMode>('dusk');
 
   // Cloud Firestore real-time collections (onSnapshot)
+  const [firebaseConfigVersion, setFirebaseConfigVersion] = useState(0);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
   const [isUpdatingApp, setIsUpdatingApp] = useState(false);
   const [vaultConfig, setVaultConfig] = useState<VaultConfig | null>(null);
@@ -204,7 +205,7 @@ export default function App() {
       window.clearTimeout(fallbackTimer);
       unsubscribe();
     };
-  }, []);
+  }, [firebaseConfigVersion]);
 
   // Restore remembered session OR native Firebase Auth Admin session when members load from Firestore
   useEffect(() => {
@@ -240,7 +241,7 @@ export default function App() {
       }
 
       // 2. Check native Firebase Auth user (browserLocalPersistence) for Primary Admin
-      const fbUser = auth.currentUser;
+      const fbUser = auth?.currentUser;
       if (fbUser) {
         const adminMember = members.find(
           (m) =>
@@ -276,15 +277,17 @@ export default function App() {
     };
 
     tryRestoreSession();
-    const unsubAuth = onAuthStateChanged(auth, () => {
-      tryRestoreSession();
-    });
+    const unsubAuth = auth
+      ? onAuthStateChanged(auth, () => {
+          tryRestoreSession();
+        })
+      : () => {};
 
     return () => {
       cancelled = true;
       unsubAuth();
     };
-  }, [members, currentMemberId, isVaultLockedByTimeout]);
+  }, [members, currentMemberId, isVaultLockedByTimeout, firebaseConfigVersion]);
 
   // Start clipboard auto-clear countdown
   const startClipboardCountdown = (seconds: number, label: string) => {
@@ -2237,7 +2240,9 @@ export default function App() {
           } catch {
       // ignore
     }
-    await signOut(auth).catch(() => {});
+    if (auth) {
+      await signOut(auth).catch(() => {});
+    }
     setCurrentMemberId(null);
     setActiveDekBase64(null);
     setActiveMergedDeks([]);
@@ -2325,6 +2330,9 @@ export default function App() {
             onInstallPWA={handleInstallPWAOrGuide}
             onTriggerAppUpdate={handleTriggerAppUpdate}
             isUpdatingApp={isUpdatingApp}
+            onFirebaseConfigActivated={() =>
+              setFirebaseConfigVersion((v) => v + 1)
+            }
             onAdminGoogleLogin={handleAdminGoogleLogin}
             onLoginWithCredentials={handleLoginWithCredentials}
             onRegisterMemberAccountWithInvite={

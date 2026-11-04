@@ -18,9 +18,8 @@ import {
   VaultConfig,
 } from '../types/vault';
 import {
-  FIREBASE_AUTH_DOMAIN,
-  FIREBASE_DATABASE_ID,
-  FIREBASE_PROJECT_ID,
+  exportActiveFirebaseConfigJson,
+  getFirebaseProjectInfo,
 } from '../lib/firebase';
 
 interface AdminTab3ConfigAndBackupProps {
@@ -77,8 +76,10 @@ export const AdminTab3ConfigAndBackup: React.FC<
 
   // Authorized domain copy helper
   const [copiedDomain, setCopiedDomain] = useState<string | null>(null);
+  const [copiedFbConfigJson, setCopiedFbConfigJson] = useState(false);
   const currentHostname =
     typeof window !== 'undefined' ? window.location.hostname : '';
+  const fbInfo = getFirebaseProjectInfo();
 
   const [pendingRestorePayload, setPendingRestorePayload] = useState<{
     sourceLabel: string;
@@ -89,6 +90,26 @@ export const AdminTab3ConfigAndBackup: React.FC<
     navigator.clipboard.writeText(domainText).catch(() => {});
     setCopiedDomain(domainText);
     setTimeout(() => setCopiedDomain(null), 2500);
+  };
+
+  const handleCopyFirebaseConfigJson = () => {
+    const json = exportActiveFirebaseConfigJson();
+    navigator.clipboard.writeText(json).catch(() => {});
+    setCopiedFbConfigJson(true);
+    setTimeout(() => setCopiedFbConfigJson(false), 2500);
+  };
+
+  const handleDownloadFirebaseConfigJson = () => {
+    const json = exportActiveFirebaseConfigJson();
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `firebase-config-${fbInfo.projectId || 'vault'}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleAddCategory = async (e: React.FormEvent) => {
@@ -254,17 +275,53 @@ export const AdminTab3ConfigAndBackup: React.FC<
               <div className="font-semibold text-[var(--vault-text)]">
                 Połączony projekt Firebase:{' '}
                 <span className="font-mono text-[var(--vault-accent)]">
-                  {FIREBASE_PROJECT_ID}
+                  {fbInfo.projectId}
                 </span>
               </div>
               <div className="text-[11px] font-mono text-[var(--vault-muted)]">
-                Baza Firestore: {FIREBASE_DATABASE_ID} · Auth Domain: {FIREBASE_AUTH_DOMAIN}
+                Baza Firestore: {fbInfo.databaseId} · Auth Domain: {fbInfo.authDomain}
               </div>
             </div>
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[var(--vault-success)] text-[var(--vault-success)] font-semibold">
               <CheckCircle2 className="w-3.5 h-3.5" />
               <span>Synchronizacja onSnapshot Aktywna</span>
             </span>
+          </div>
+
+          <div className="pt-3 border-t border-[var(--vault-border)] space-y-2">
+            <div className="font-semibold text-[var(--vault-text)]">
+              Eksport lokalnego pliku konfiguracyjnego Firebase (JSON) dla czystej instalacji PWA Administratora:
+            </div>
+            <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
+              Publiczne repozytorium na GitHubie nie zawiera żadnych kluczy Firebase. Pobierz lub skopiuj poniższy plik <code className="font-mono text-[var(--vault-text)]">firebase-config.json</code>, aby załadować go w drugim kroku po zainstalowaniu czystej aplikacji PWA na telefonie Administratora:
+            </p>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={handleDownloadFirebaseConfigJson}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Pobierz plik firebase-config.json</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleCopyFirebaseConfigJson}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg cursor-pointer"
+              >
+                {copiedFbConfigJson ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-[var(--vault-success)]" />
+                    <span>Skopiowano JSON konfiguracji Firebase!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                    <span>Kopiuj JSON konfiguracji Firebase</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
 
           <div className="pt-3 border-t border-[var(--vault-border)] space-y-2">
@@ -315,7 +372,7 @@ export const AdminTab3ConfigAndBackup: React.FC<
                 )}
 
               <a
-                href={`https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`}
+                href={`https://console.firebase.google.com/project/${fbInfo.projectId}/authentication/settings`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-accent)] border border-[var(--vault-accent)] rounded-lg hover:bg-[var(--vault-surface)]"

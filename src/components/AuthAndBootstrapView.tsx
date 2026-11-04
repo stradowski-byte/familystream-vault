@@ -18,13 +18,28 @@ import {
   Copy,
   Check,
   Cloud,
+  Upload,
+  Database,
+  Settings,
 } from 'lucide-react';
 import {
   onAuthStateChanged,
   signInWithPopup,
   User as FirebaseUser,
 } from 'firebase/auth';
-import { auth, googleProvider } from '../lib/firebase';
+import {
+  auth,
+  clearCustomFirebaseConfig,
+  decodeFirebaseConfigFromInviteUrl,
+  getDeviceInstanceRole,
+  getFirebaseProjectInfo,
+  googleProvider,
+  isFirebaseConfigured,
+  parseAndValidateFirebaseConfigInput,
+  PWA_HANDOFF_CACHE_NAME,
+  saveCustomFirebaseConfigAsAdmin,
+  saveCustomFirebaseConfigAsMember,
+} from '../lib/firebase';
 import { verifyInvitationTokenInFirestore } from '../lib/firestoreVaultService';
 import {
   Device,
@@ -53,6 +68,7 @@ interface AuthAndBootstrapViewProps {
   onInstallPWA: () => void;
   onTriggerAppUpdate: () => Promise<void>;
   isUpdatingApp: boolean;
+  onFirebaseConfigActivated: () => void;
   onAdminGoogleLogin: (options: {
     firebaseUser: FirebaseUser;
     masterPassword?: string;
@@ -77,43 +93,62 @@ interface AuthAndBootstrapViewProps {
   onCancelPendingState: () => void;
   }
 
-const PWA_INVITE_HANDOFF_CACHE = 'fsv-pwa-handoff-cache-v1';
 const PWA_INVITE_HANDOFF_KEY = 'fsv_invite_token_v1';
+const PWA_FB_CONFIG_HANDOFF_KEY = 'fsv_invite_fb_param_v1';
 
-function extractInviteTokenFromInput(raw: string): string {
+function extractInviteAndFbFromInput(raw: string): {
+  inviteToken: string;
+  fbParam: string;
+} {
   const trimmed = raw.trim();
-  if (!trimmed) return '';
+  if (!trimmed) return { inviteToken: '', fbParam: '' };
   try {
-    if (trimmed.includes('invite=')) {
+    if (trimmed.includes('invite=') || trimmed.includes('fb=')) {
       const url = new URL(
         trimmed.startsWith('http')
           ? trimmed
           : `https://vault.local/${trimmed.replace(/^\//, '')}`
       );
-      return (url.searchParams.get('invite') || '').trim();
+      return {
+        inviteToken: (url.searchParams.get('invite') || '').trim(),
+        fbParam: (url.searchParams.get('fb') || '').trim(),
+      };
     }
   } catch {
-    const match = trimmed.match(/[?&]invite=([^&#\s]+)/);
-    if (match?.[1]) return decodeURIComponent(match[1]);
+    const invMatch = trimmed.match(/[?&]invite=([^&#\s]+)/);
+    const fbMatch = trimmed.match(/[?&]fb=([^&#\s]+)/);
+    return {
+      inviteToken: invMatch?.[1] ? decodeURIComponent(invMatch[1]) : '',
+      fbParam: fbMatch?.[1] ? decodeURIComponent(fbMatch[1]) : '',
+    };
   }
-  return trimmed;
+  return { inviteToken: trimmed, fbParam: '' };
 }
 
-async function saveInviteTokenForPwaHandoff(token: string): Promise<void> {
-  if (!token) return;
+async function saveInviteAndFbForPwaHandoff(
+  inviteToken: string,
+  fbParam: string
+): Promise<void> {
   try {
-    localStorage.setItem(PWA_INVITE_HANDOFF_KEY, token);
+    if (inviteToken) localStorage.setItem(PWA_INVITE_HANDOFF_KEY, inviteToken);
+    if (fbParam) localStorage.setItem(PWA_FB_CONFIG_HANDOFF_KEY, fbParam);
   } catch {
     // ignore
   }
   if (typeof window !== 'undefined' && 'caches' in window) {
     try {
-      const cache = await window.caches.open(PWA_INVITE_HANDOFF_CACHE);
+      const cache = await window.caches.open(PWA_HANDOFF_CACHE_NAME);
       await cache.put(
         new Request('/__fsv_invite_handoff__'),
-        new Response(JSON.stringify({ inviteToken: token }), {
-          headers: { 'Content-Type': 'application/json' },
-        })
+        new Response(
+          JSON.stringify({
+            inviteToken: inviteToken || '',
+            fbParam: fbParam || '',
+          }),
+          {
+            headers: { 'Content-Type': 'application/json' },
+          }
+        )
       );
     } catch {
       // ignore
@@ -121,37 +156,51 @@ async function saveInviteTokenForPwaHandoff(token: string): Promise<void> {
   }
 }
 
-async function loadInviteTokenFromPwaHandoff(): Promise<string> {
+async function loadInviteAndFbFromPwaHandoff(): Promise<{
+  inviteToken: string;
+  fbParam: string;
+}> {
+  let inviteToken = '';
+  let fbParam = '';
   try {
-    const fromLs = localStorage.getItem(PWA_INVITE_HANDOFF_KEY);
-    if (fromLs) return fromLs;
+    inviteToken = localStorage.getItem(PWA_INVITE_HANDOFF_KEY) || '';
+    fbParam = localStorage.getItem(PWA_FB_CONFIG_HANDOFF_KEY) || '';
   } catch {
     // ignore
   }
-  if (typeof window !== 'undefined' && 'caches' in window) {
+  if (
+    (!inviteToken || !fbParam) &&
+    typeof window !== 'undefined' &&
+    'caches' in window
+  ) {
     try {
-      const cache = await window.caches.open(PWA_INVITE_HANDOFF_CACHE);
+      const cache = await window.caches.open(PWA_HANDOFF_CACHE_NAME);
       const res = await cache.match(new Request('/__fsv_invite_handoff__'));
       if (res) {
-        const data = (await res.json()) as { inviteToken?: string };
-        if (data?.inviteToken) return data.inviteToken;
+        const data = (await res.json()) as {
+          inviteToken?: string;
+          fbParam?: string;
+        };
+        if (!inviteToken && data?.inviteToken) inviteToken = data.inviteToken;
+        if (!fbParam && data?.fbParam) fbParam = data.fbParam;
       }
     } catch {
       // ignore
     }
   }
-  return '';
+  return { inviteToken, fbParam };
 }
 
 async function clearInviteTokenHandoff(): Promise<void> {
   try {
     localStorage.removeItem(PWA_INVITE_HANDOFF_KEY);
+    localStorage.removeItem(PWA_FB_CONFIG_HANDOFF_KEY);
   } catch {
     // ignore
   }
   if (typeof window !== 'undefined' && 'caches' in window) {
     try {
-      const cache = await window.caches.open(PWA_INVITE_HANDOFF_CACHE);
+      const cache = await window.caches.open(PWA_HANDOFF_CACHE_NAME);
       await cache.delete(new Request('/__fsv_invite_handoff__'));
     } catch {
       // ignore
@@ -170,6 +219,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   onInstallPWA,
   onTriggerAppUpdate,
   isUpdatingApp,
+  onFirebaseConfigActivated,
   onAdminGoogleLogin,
   onLoginWithCredentials,
   onRegisterMemberAccountWithInvite,
@@ -178,6 +228,22 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   onUnlockWithBiometrics,
   onCancelPendingState,
   }) => {
+  const [firebaseReady, setFirebaseReady] = useState<boolean>(() =>
+    isFirebaseConfigured()
+  );
+  const [deviceRole, setDeviceRole] = useState<'admin' | 'member' | null>(() =>
+    getDeviceInstanceRole()
+  );
+
+  // Gatekeep 2: Local Firebase Config JSON loader state
+  const [rawFirebaseJsonInput, setRawFirebaseJsonInput] = useState('');
+  const [customDatabaseIdInput, setCustomDatabaseIdInput] = useState('');
+  const [firebaseConfigError, setFirebaseConfigError] = useState<string | null>(
+    null
+  );
+  const [showChangeFirebaseConfigModal, setShowChangeFirebaseConfigModal] =
+    useState(false);
+
   const isVaultInitialized = Boolean(
     (vaultConfig && vaultConfig.initialized) || membersCount > 0
   );
@@ -185,7 +251,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   // Invitation token from URL (?invite=...) or restored from PWA Handoff CacheStorage
   const [inviteToken, setInviteToken] = useState<string>(() => {
     if (typeof window === 'undefined') return '';
-    return extractInviteTokenFromInput(window.location.search);
+    return extractInviteAndFbFromInput(window.location.search).inviteToken;
   });
   const [isInitializingHandoff, setIsInitializingHandoff] = useState(true);
 
@@ -200,6 +266,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   // Login form state
   const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
+  const [showAdminFallbackPasswordLogin, setShowAdminFallbackPasswordLogin] =
+    useState(false);
 
   // Invite registration / recovery form state
   const [regFullName, setRegFullName] = useState('');
@@ -218,43 +286,80 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [isAdminLoading, setIsAdminLoading] = useState(false);
   const [isFamilyLoading, setIsFamilyLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [unauthorizedDomainHost, setUnauthorizedDomainHost] = useState<
+    string | null
+  >(null);
+  const [copiedDomainHost, setCopiedDomainHost] = useState(false);
 
   // Native Firebase Auth user state (persisted via browserLocalPersistence)
   const [firebaseAuthUser, setFirebaseAuthUser] = useState<FirebaseUser | null>(
-    () => auth.currentUser
+    () => (isFirebaseConfigured() && auth ? auth.currentUser : null)
   );
   const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
   const [copiedCustomLink, setCopiedCustomLink] = useState(false);
 
-  // Strict PWA-only enforcement outside AI Studio
+  // Strict PWA-only enforcement outside AI Studio (GATEKEEP 1)
   const isRunningInInstalledPwa =
     isPWAInstalled || detectedDevice.clientMode === 'pwa';
   const isBrowserBlocked = !isAiStudioPreview && !isRunningInInstalledPwa;
 
-  // Listen to native Firebase Auth state (browserLocalPersistence)
+  // Listen to native Firebase Auth state (browserLocalPersistence) when Firebase is configured
   useEffect(() => {
+    if (!firebaseReady || !auth) return;
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setFirebaseAuthUser(user);
     });
     return () => unsubscribe();
-  }, []);
+  }, [firebaseReady]);
 
-  // Save/restore ?invite=TOKEN across browser -> installed PWA handoff
+  // Save/restore ?invite=TOKEN&fb=CONFIG across browser -> installed PWA handoff
   useEffect(() => {
     let active = true;
     async function initInviteHandoff() {
       try {
         if (typeof window !== 'undefined') {
-          const urlInvite = extractInviteTokenFromInput(window.location.search);
+          const { inviteToken: urlInvite, fbParam: urlFb } =
+            extractInviteAndFbFromInput(window.location.search);
+
+          if (urlFb) {
+            const decodedCfg = decodeFirebaseConfigFromInviteUrl(urlFb);
+            if (decodedCfg) {
+              saveCustomFirebaseConfigAsMember(decodedCfg);
+              if (active) {
+                setFirebaseReady(true);
+                setDeviceRole('member');
+              }
+              onFirebaseConfigActivated();
+            }
+          }
+
           if (urlInvite) {
-            await saveInviteTokenForPwaHandoff(urlInvite);
-            if (active) setInviteToken(urlInvite);
+            await saveInviteAndFbForPwaHandoff(urlInvite, urlFb);
+            if (active) {
+              setInviteToken(urlInvite);
+              setDeviceRole('member');
+            }
             return;
           }
         }
-        const restoredToken = await loadInviteTokenFromPwaHandoff();
-        if (active && restoredToken && !inviteToken) {
-          setInviteToken(restoredToken);
+
+        const restored = await loadInviteAndFbFromPwaHandoff();
+        if (restored.fbParam) {
+          const decodedCfg = decodeFirebaseConfigFromInviteUrl(
+            restored.fbParam
+          );
+          if (decodedCfg) {
+            saveCustomFirebaseConfigAsMember(decodedCfg);
+            if (active) {
+              setFirebaseReady(true);
+              setDeviceRole('member');
+            }
+            onFirebaseConfigActivated();
+          }
+        }
+        if (active && restored.inviteToken && !inviteToken) {
+          setInviteToken(restored.inviteToken);
+          setDeviceRole('member');
         }
       } finally {
         if (active) setIsInitializingHandoff(false);
@@ -266,10 +371,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     };
   }, []);
 
-  // Verify invite token directly in Cloud Firestore whenever `inviteToken` changes
+  // Verify invite token directly in Cloud Firestore whenever `inviteToken` and `firebaseReady` are active
   useEffect(() => {
     let cancelled = false;
-    if (!inviteToken || isInitializingHandoff) {
+    if (!inviteToken || isInitializingHandoff || !firebaseReady) {
       if (!inviteToken) {
         setVerifiedInvite(null);
         setInviteError(null);
@@ -308,7 +413,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [inviteToken, isInitializingHandoff]);
+  }, [inviteToken, isInitializingHandoff, firebaseReady]);
 
   const clearInviteFromUrlAndState = () => {
     setInviteToken('');
@@ -317,10 +422,12 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     clearInviteTokenHandoff().catch(() => {});
     if (
       typeof window !== 'undefined' &&
-      window.location.search.includes('invite=')
+      (window.location.search.includes('invite=') ||
+        window.location.search.includes('fb='))
     ) {
       const url = new URL(window.location.href);
       url.searchParams.delete('invite');
+      url.searchParams.delete('fb');
       window.history.replaceState({}, '', url.pathname + url.search);
     }
   };
@@ -350,7 +457,84 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     setTimeout(() => setCopiedCustomLink(false), 2500);
   };
 
-  // 0. STRICT BROWSER BLOCK GATE (Force PWA Installation on GitHub Pages / Web Browser)
+  // GATEKEEP 2 HANDLERS: Upload or Paste Firebase Config JSON -> Activates Admin Instance!
+  const handleFirebaseJsonFileSelect = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFirebaseConfigError(null);
+    try {
+      const text = await file.text();
+      setRawFirebaseJsonInput(text);
+      const validated = parseAndValidateFirebaseConfigInput(
+        text,
+        customDatabaseIdInput
+      );
+      saveCustomFirebaseConfigAsAdmin(validated);
+      setFirebaseReady(true);
+      setDeviceRole('admin');
+      setShowChangeFirebaseConfigModal(false);
+      onFirebaseConfigActivated();
+    } catch (err) {
+      setFirebaseConfigError(
+        err instanceof Error
+          ? err.message
+          : 'Nie udało się wczytać pliku JSON konfiguracji Firebase.'
+      );
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleFirebaseJsonSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setFirebaseConfigError(null);
+    try {
+      const validated = parseAndValidateFirebaseConfigInput(
+        rawFirebaseJsonInput,
+        customDatabaseIdInput
+      );
+      saveCustomFirebaseConfigAsAdmin(validated);
+      setFirebaseReady(true);
+      setDeviceRole('admin');
+      setShowChangeFirebaseConfigModal(false);
+      onFirebaseConfigActivated();
+    } catch (err) {
+      setFirebaseConfigError(
+        err instanceof Error
+          ? err.message
+          : 'Nieprawidłowa konfiguracja Firebase.'
+      );
+    }
+  };
+
+  const handleApplyManualInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const { inviteToken: extractedInvite, fbParam: extractedFb } =
+      extractInviteAndFbFromInput(manualInviteInput);
+    if (!extractedInvite) return;
+
+    if (extractedFb) {
+      const decodedCfg = decodeFirebaseConfigFromInviteUrl(extractedFb);
+      if (decodedCfg) {
+        saveCustomFirebaseConfigAsMember(decodedCfg);
+        setFirebaseReady(true);
+        setDeviceRole('member');
+        onFirebaseConfigActivated();
+      }
+    }
+
+    await saveInviteAndFbForPwaHandoff(extractedInvite, extractedFb);
+    setInviteToken(extractedInvite);
+    setDeviceRole('member');
+    setShowManualInviteBox(false);
+    setManualInviteInput('');
+  };
+
+  // ============================================================================
+  // GATEKEEP 1: STRICT BROWSER BLOCK GATE (Force PWA Installation first)
+  // ============================================================================
   if (isBrowserBlocked) {
     const hasCustomInviteInUrlOrHandoff = Boolean(
       inviteToken ||
@@ -364,14 +548,14 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
           <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
             <Smartphone className="w-4 h-4 shrink-0" />
             <span>
-              Wymagana Instalacja Aplikacji PWA · Blokada Trybu Przeglądarki
+              Krok 01 · Wymagana Instalacja Aplikacji PWA (Blokada Przeglądarki)
             </span>
           </div>
           <h1 className="text-xl sm:text-2xl font-bold font-display text-[var(--vault-text)] leading-snug">
             Zainstaluj FamilyStream Vault jako aplikację PWA, aby kontynuować
           </h1>
           <p className="text-xs sm:text-sm text-[var(--vault-muted)] leading-relaxed">
-            Ze względów bezpieczeństwa oraz trwałego powiązania Certyfikatu Sprzętowego z bazą Cloud Firestore korzystanie ze skarbca w zwykłej karcie przeglądarki jest wyłączone. Zainstaluj aplikację lokalnie na swoim urządzeniu i otwórz ją z ikony na ekranie głównym.
+            Ze względów bezpieczeństwa oraz trwałego powiązania Certyfikatu Sprzętowego korzystanie ze skarbca w zwykłej karcie przeglądarki jest wyłączone. Zainstaluj aplikację lokalnie na swoim urządzeniu i otwórz ją z ikony na ekranie głównym.
           </p>
         </div>
 
@@ -384,7 +568,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                   Wykryto link zaproszeniowy do Skarbca Rodzinnego!
                 </div>
                 <p className="text-[var(--vault-muted)] leading-relaxed">
-                  Token zaproszenia został zapisany w pamięci podręcznej tego urządzenia. Po zainstalowaniu i uruchomieniu aplikacji PWA Twoje zaproszenie otworzy się automatycznie i połączy z bazą Cloud Firestore.
+                  Zaproszenie oraz parametry połączenia z bazą zostały zapisane w pamięci podręcznej urządzenia. Po zainstalowaniu i uruchomieniu aplikacji PWA od razu zobaczysz ekran <strong>„Utwórz konto”</strong>.
                 </p>
               </div>
             </div>
@@ -402,7 +586,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 <>
                   <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
                   <span>
-                    Kopiuj ten link zaproszeniowy (na wypadek ręcznego wklejenia w PWA)
+                    Kopiuj ten link zaproszeniowy (zapasowo przed instalacją PWA)
                   </span>
                 </>
               )}
@@ -476,7 +660,143 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     );
   }
 
-  // 1. DEVICE / ACCOUNT AUTHORIZATION WAITING SCREEN
+  // ============================================================================
+  // GATEKEEP 2: CLEAN PWA WITHOUT FIREBASE CONFIG -> ADMIN LOCAL JSON LOADER
+  // ============================================================================
+  if (!firebaseReady || showChangeFirebaseConfigModal) {
+    return (
+      <div className="max-w-lg mx-auto my-6 p-6 sm:p-8 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-6 shadow-md">
+        <div className="space-y-2">
+          <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
+            <Database className="w-4 h-4 shrink-0" />
+            <span>
+              Krok 02 · Inicjalizacja Własnej Instancji Skarbca (Brak Configu w GitHub)
+            </span>
+          </div>
+          <h1 className="text-xl sm:text-2xl font-bold font-display text-[var(--vault-text)] leading-snug">
+            Załaduj lokalnie plik JSON konfiguracji Firebase
+          </h1>
+          <p className="text-xs sm:text-sm text-[var(--vault-muted)] leading-relaxed">
+            Publiczne repozytorium na GitHubie nie przechowuje żadnych kluczy Firebase. Wgraj swój plik <code className="font-mono text-[var(--vault-text)]">firebase-config.json</code> lub wklej obiekt konfiguracyjny poniżej — to wyzwoli utworzenie instancji Administratora i otworzy logowanie Google.
+          </p>
+        </div>
+
+        {/* Option A: 1-Tap File Upload (.json) */}
+        <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-3">
+          <div className="text-xs font-semibold text-[var(--vault-text)]">
+            Opcja A (Najszybsza): Wybierz plik <code className="font-mono">.json</code> z pamięci urządzenia
+          </div>
+          <label className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer shadow-sm">
+            <Upload className="w-4 h-4 shrink-0" />
+            <span>Wybierz plik firebase-config.json z urządzenia</span>
+            <input
+              type="file"
+              accept=".json,application/json,text/plain"
+              onChange={handleFirebaseJsonFileSelect}
+              className="hidden"
+            />
+          </label>
+        </div>
+
+        {/* Option B: Paste JSON or firebaseConfig snippet */}
+        <form onSubmit={handleFirebaseJsonSubmit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
+              Opcja B: Wklej zawartość JSON lub obiekt <code className="font-mono">firebaseConfig</code> z Firebase Console
+            </label>
+            <textarea
+              rows={6}
+              value={rawFirebaseJsonInput}
+              onChange={(e) => setRawFirebaseJsonInput(e.target.value)}
+              placeholder={`{\n  "apiKey": "AIzaSy...",\n  "authDomain": "twoj-projekt.firebaseapp.com",\n  "projectId": "twoj-projekt",\n  "appId": "1:...",\n  "firestoreDatabaseId": "(default)"\n}`}
+              className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+            />
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
+              Opcjonalne ID bazy Firestore (pozostaw puste jeśli jest w JSON lub używasz domyślnej bazy)
+            </label>
+            <input
+              type="text"
+              value={customDatabaseIdInput}
+              onChange={(e) => setCustomDatabaseIdInput(e.target.value)}
+              placeholder="np. ai-studio-... lub zostaw puste dla (default)"
+              className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+            />
+          </div>
+
+          {firebaseConfigError && (
+            <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
+              {firebaseConfigError}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="submit"
+              className="flex-1 inline-flex items-center justify-center gap-2 px-5 py-3 text-xs sm:text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer"
+            >
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+              <span>Załaduj konfigurację i uruchom jako Administrator</span>
+            </button>
+
+            {showChangeFirebaseConfigModal && firebaseReady && (
+              <button
+                type="button"
+                onClick={() => setShowChangeFirebaseConfigModal(false)}
+                className="px-4 py-3 text-xs font-semibold text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded-xl cursor-pointer"
+              >
+                Anuluj
+              </button>
+            )}
+          </div>
+        </form>
+
+        {/* Family Member Invite Link Paste Fallback */}
+        <div className="pt-4 border-t border-[var(--vault-border)] space-y-2.5 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
+            <span>
+              Jesteś domownikiem i otrzymałeś link zaproszeniowy od Administratora?
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowManualInviteBox((v) => !v)}
+              className="text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer"
+            >
+              {showManualInviteBox
+                ? 'Ukryj pole linku'
+                : 'Wklej link zaproszeniowy'}
+            </button>
+          </div>
+          {showManualInviteBox && (
+            <form
+              onSubmit={handleApplyManualInvite}
+              className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1"
+            >
+              <input
+                type="text"
+                value={manualInviteInput}
+                onChange={(e) => setManualInviteInput(e.target.value)}
+                placeholder="Wklej pełny link zaproszeniowy od Administratora..."
+                className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
+              />
+              <button
+                type="submit"
+                className="px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
+              >
+                Otwórz zaproszenie
+              </button>
+            </form>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ============================================================================
+  // WAITING SCREEN FOR PENDING ACCOUNT / DEVICE APPROVAL (Real-time onSnapshot)
+  // ============================================================================
   if (pendingAuthState) {
     const { member, existingDevice } = pendingAuthState;
     const isAccountPending = member.status === 'pending';
@@ -516,7 +836,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             <strong className="text-[var(--vault-text)]">
               {member.fullName} (login: {member.username})
             </strong>
-            . Ze względów bezpieczeństwa dostęp do haseł otworzy się natychmiast (przez nasłuchiwanie czasu rzeczywistego <code>onSnapshot</code>), gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj” w swoim panelu.
+            . Dostęp do skarbca otworzy się automatycznie w tej samej sekundzie (przez nasłuchiwanie czasu rzeczywistego <code>onSnapshot</code>), gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj”.
           </p>
         </div>
 
@@ -531,34 +851,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
           </div>
           <div className="flex items-center justify-between">
             <span className="text-[var(--vault-muted)]">
-              Typ sprzętu i tryb klienta:
-            </span>
-            <span className="font-medium text-[var(--vault-text)]">
-              {detectedDevice.hardwareDeviceType === 'phone'
-                ? 'Smartfon / Telefon'
-                : detectedDevice.hardwareDeviceType === 'tablet'
-                  ? 'Tablet'
-                  : 'Laptop / Komputer'}{' '}
-              ·{' '}
-              {detectedDevice.clientMode === 'pwa'
-                ? 'Aplikacja PWA (Zainstalowana)'
-                : 'Przeglądarka internetowa'}
-            </span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-[var(--vault-muted)]">
               Sygnatura sprzętowa (do klucza prywatnego):
             </span>
             <span className="font-mono font-semibold text-[var(--vault-accent)]">
               {detectedDevice.hardwareSignatureHash}
-            </span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-[var(--vault-muted)]">
-              Identyfikator sprzętowy urządzenia:
-            </span>
-            <span className="font-mono text-[var(--vault-muted)]">
-              {detectedDevice.deviceFingerprint}
             </span>
           </div>
         </div>
@@ -604,14 +900,12 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               <Clock className="w-4 h-4 text-[var(--vault-accent)]" />
               <span>
                 {isAccountPending
-                  ? 'Prośba „Załóż mi konto” została zapisana w Cloud Firestore!'
-                  : 'Prośba o autoryzację urządzenia została zapisana w Cloud Firestore!'}
+                  ? 'Konto zostało utworzone i oczekuje na zatwierdzenie!'
+                  : 'Urządzenie oczekuje na zatwierdzenie!'}
               </span>
             </div>
             <p className="text-xs text-[var(--vault-muted)]">
-              {isAccountPending
-                ? 'Twoje zgłoszenie jest już widoczne w czasie rzeczywistym u Administratora i Zaufanego Opiekuna. Gdy klikną „Akceptuj”, skarbiec otworzy się automatycznie na tym ekranie.'
-                : 'Twoje urządzenie czeka na zatwierdzenie. Gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj”, skarbiec otworzy się automatycznie.'}
+              Gdy Administrator lub Zaufany Opiekun kliknie „Akceptuj”, skarbiec otworzy się automatycznie. Przy kolejnych wejściach będziesz widzieć już tylko ekran logowania.
             </p>
           </div>
         )}
@@ -622,7 +916,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             onClick={onCancelPendingState}
             className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
           >
-            Wróć do ekranu logowania
+            Przejdź do ekranu logowania
           </button>
           <span className="text-[var(--vault-muted)]">
             Cloud Firestore onSnapshot aktywny
@@ -632,9 +926,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     );
   }
 
-  // Native Firebase Auth Google login handler
+  // Native Firebase Auth Google login handler (Admin Instance)
   const handleAdminClick = async (forceAccountSelection = false) => {
     setErrorMsg(null);
+    setUnauthorizedDomainHost(null);
     setIsAdminLoading(true);
     try {
       let userToUse = !forceAccountSelection ? auth.currentUser : null;
@@ -663,7 +958,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       const code = (err as { code?: string })?.code || '';
       if (code === 'auth/unauthorized-domain') {
         const host =
-          typeof window !== 'undefined' ? window.location.hostname : '';
+          typeof window !== 'undefined'
+            ? window.location.hostname
+            : 'stradowski-byte.github.io';
+        setUnauthorizedDomainHost(host);
         setErrorMsg(
           `Domena „${host}” nie jest jeszcze dodana do autoryzowanych domen w Firebase Auth. Dodaj ją w Firebase Console -> Authentication -> Settings -> Authorized domains.`
         );
@@ -728,7 +1026,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         setErrorMsg(
           err instanceof Error
             ? err.message
-            : 'Nie udało się zresetować dostępu z linku ratunkowego.'
+            : 'Nie udało się zresetować dostępu z linku ratunkowym.'
         );
       } finally {
         setIsFamilyLoading(false);
@@ -781,21 +1079,17 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     }
   };
 
-  const handleApplyManualInvite = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const extracted = extractInviteTokenFromInput(manualInviteInput);
-    if (!extracted) return;
-    await saveInviteTokenForPwaHandoff(extracted);
-    setInviteToken(extracted);
-    setShowManualInviteBox(false);
-    setManualInviteInput('');
-  };
-
   const rememberedAdminEmail =
     firebaseAuthUser?.email ||
     (vaultConfig?.adminEmail && !vaultConfig.adminEmail.endsWith('.local')
       ? vaultConfig.adminEmail
       : null);
+
+  const fbInfo = getFirebaseProjectInfo();
+
+  // Determine whether this device is operating in Family Member mode (Zero Admin UI) or Admin Instance mode
+  const isFamilyMemberMode =
+    Boolean(inviteToken) || deviceRole === 'member';
 
   return (
     <div className="max-w-lg mx-auto my-4 space-y-6">
@@ -848,143 +1142,9 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         </div>
       </div>
 
-      {/* CASE 1: FRESH UNINITIALIZED INSTANCE -> ADMIN FIREBASE GOOGLE AUTH */}
-      {!isVaultInitialized && !inviteToken ? (
-        <div className="p-5 sm:p-7 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5 overflow-hidden">
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
-              <Cloud className="w-4 h-4 shrink-0" />
-              <span>
-                Autoryzacja Głównego Administratora · Firebase Auth + Cloud Firestore
-              </span>
-            </div>
-            <h1 className="text-xl font-bold font-display text-[var(--vault-text)]">
-              Zaloguj się kontem Google i zainicjalizuj Skarbiec w Cloud Firestore
-            </h1>
-            <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
-              Kliknij przycisk poniżej, aby zalogować się przez <strong>Firebase Authentication</strong>. Sesja zostanie natywnie zapamiętana w przeglądarce (<code>browserLocalPersistence</code>), a szyfrowanie haseł (E2E AES-256-GCM) odbywa się w 100% lokalnie na Twoim urządzeniu.
-            </p>
-          </div>
-
-          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
-            <label className="block text-[11px] font-medium text-[var(--vault-muted)]">
-              Opcjonalne hasło główne Admina (ułatwia awaryjne logowanie loginem <code className="font-mono text-[var(--vault-accent)]">admin</code>)
-            </label>
-            <input
-              type="password"
-              value={adminMasterPasswordInput}
-              onChange={(e) => setAdminMasterPasswordInput(e.target.value)}
-              placeholder="Opcjonalne hasło (min. 4 znaki)..."
-              className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
-            />
-          </div>
-
-          {errorMsg && (
-            <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
-              {errorMsg}
-            </div>
-          )}
-
-          <div className="space-y-2">
-            <button
-              type="button"
-              onClick={() => handleAdminClick(false)}
-              disabled={isAdminLoading}
-              className="gsi-material-button !w-full"
-            >
-              <div className="gsi-material-button-content-wrapper">
-                <div className="gsi-material-button-icon">
-                  <svg
-                    version="1.1"
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 48 48"
-                    style={{ display: 'block' }}
-                  >
-                    <path
-                      fill="#EA4335"
-                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                    ></path>
-                    <path
-                      fill="#4285F4"
-                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                    ></path>
-                    <path
-                      fill="#FBBC05"
-                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                    ></path>
-                    <path
-                      fill="#34A853"
-                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                    ></path>
-                    <path fill="none" d="M0 0h48v48H0z"></path>
-                  </svg>
-                </div>
-                <span className="gsi-material-button-contents">
-                  {isAdminLoading
-                    ? 'Logowanie przez Firebase Auth...'
-                    : rememberedAdminEmail
-                      ? `Zaloguj jako Administrator (${rememberedAdminEmail})`
-                      : 'Zaloguj przez Google (Firebase Auth)'}
-                </span>
-              </div>
-            </button>
-
-            {rememberedAdminEmail && (
-              <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
-                <span>
-                  Aktywna sesja Firebase Auth: <strong>{rememberedAdminEmail}</strong>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => handleAdminClick(true)}
-                  disabled={isAdminLoading}
-                  className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
-                >
-                  Zmień konto Google
-                </button>
-              </div>
-            )}
-          </div>
-
-          {/* Manual invite paste for family member */}
-          <div className="pt-2 border-t border-[var(--vault-border)] space-y-2 text-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
-              <span>Jesteś domownikiem i otrzymałeś link zaproszeniowy od Admina?</span>
-              <button
-                type="button"
-                onClick={() => setShowManualInviteBox((v) => !v)}
-                className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
-              >
-                {showManualInviteBox
-                  ? 'Ukryj pole linku'
-                  : 'Wklej link zaproszeniowy'}
-              </button>
-            </div>
-            {showManualInviteBox && (
-              <form
-                onSubmit={handleApplyManualInvite}
-                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1"
-              >
-                <input
-                  type="text"
-                  value={manualInviteInput}
-                  onChange={(e) => setManualInviteInput(e.target.value)}
-                  placeholder="Wklej link zaproszeniowy od Administratora..."
-                  className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
-                />
-                <button
-                  type="submit"
-                  className="px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
-                >
-                  Otwórz zaproszenie
-                </button>
-              </form>
-            )}
-          </div>
-        </div>
-      ) : null}
-
-      {/* CASE 2: INVITATION OR RECOVERY LINK MODE (?invite=TOKEN) */}
+      {/* =====================================================================
+          MODE 1: FAMILY MEMBER FIRST-TIME INVITATION ("TYLKO UTWÓRZ KONTO")
+         ===================================================================== */}
       {inviteToken && (
         <div className="p-6 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5">
           {isInitializingHandoff || isVerifyingInvite ? (
@@ -1010,7 +1170,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 onClick={clearInviteFromUrlAndState}
                 className="w-full py-2.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer"
               >
-                Przejdź do ekranu głównego
+                Przejdź do ekranu logowania
               </button>
             </div>
           ) : (
@@ -1037,7 +1197,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                     ? `Ustaw nowe hasło dla: ${
                         verifiedInvite.targetMemberName || 'Domownika'
                       }`
-                    : 'Witaj w Rodzinnym Skarbcu — Załóż swoje konto'}
+                    : 'Utwórz swoje konto w Skarbcu Rodzinnym'}
                 </h2>
 
                 <p className="text-xs text-[var(--vault-muted)]">
@@ -1055,7 +1215,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                       <strong className="text-[var(--vault-text)]">
                         {verifiedInvite.createdByMemberName}
                       </strong>{' '}
-                      ({verifiedInvite.invitedLabel}). Wpisz swoje imię i nazwisko oraz ustal login i hasło do skarbca.
+                      ({verifiedInvite.invitedLabel}). Wpisz swoje imię i nazwisko oraz ustal login i hasło. Po zatwierdzeniu konta przy kolejnych wejściach będziesz widzieć już tylko ekran logowania.
                     </>
                   )}
                 </p>
@@ -1159,8 +1319,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                       <UserPlus className="w-4 h-4" />
                       <span>
                         {isFamilyLoading
-                          ? 'Wysyłanie zgłoszenia...'
-                          : 'Załóż mi konto'}
+                          ? 'Tworzenie konta...'
+                          : 'Utwórz konto w skarbcu'}
                       </span>
                     </>
                   )}
@@ -1181,10 +1341,11 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         </div>
       )}
 
-      {/* CASE 3: INITIALIZED VAULT STANDARD LOGIN SCREEN */}
-      {isVaultInitialized && !inviteToken && (
+      {/* =====================================================================
+          MODE 2: FAMILY MEMBER SUBSEQUENT LOGIN ("TYLKO LOGIN", ZERO ADMIN UI)
+         ===================================================================== */}
+      {!inviteToken && isFamilyMemberMode && (
         <>
-          {/* 1-Touch Fingerprint Unlock (if already paired on this device) */}
           {biometricProfile && (
             <div className="p-5 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-3">
               <div className="flex items-center justify-between">
@@ -1201,7 +1362,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               <button
                 type="button"
                 onClick={handleBiometricClick}
-                disabled={isFamilyLoading || isAdminLoading}
+                disabled={isFamilyLoading}
                 className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer"
               >
                 <Fingerprint className="w-4 h-4" />
@@ -1210,12 +1371,11 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             </div>
           )}
 
-          {/* SECTION A: FAMILY MEMBERS & CO-ADMINS LOGIN */}
           <div className="p-6 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-5">
             <div className="space-y-1">
               <div className="flex items-center justify-between gap-2 text-xs text-[var(--vault-muted)]">
                 <span className="font-semibold text-[var(--vault-text)]">
-                  01. Logowanie Domowników i Zaufanych Opiekunów
+                  Logowanie do Skarbca Rodzinnego
                 </span>
                 <span className="inline-flex items-center gap-1">
                   {detectedDevice.clientMode === 'pwa' ? (
@@ -1252,7 +1412,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             <form onSubmit={handleFamilyLoginSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
-                  Login domownika / opiekuna
+                  Twój login
                 </label>
                 <input
                   type="text"
@@ -1282,8 +1442,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
 
               <button
                 type="submit"
-                disabled={isFamilyLoading || isAdminLoading}
-                className="w-full inline-flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer"
+                disabled={isFamilyLoading}
+                className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 text-sm font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer"
               >
                 <LogIn className="w-4 h-4" />
                 <span>
@@ -1294,12 +1454,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               </button>
             </form>
 
-            {/* Invitation link helper / manual token paste for installed PWA */}
+            {/* Discreet recovery / invite link paste */}
             <div className="pt-3 border-t border-[var(--vault-border)] space-y-2.5 text-xs">
               <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
-                <span>
-                  Nie masz konta lub zapomniałeś hasła? Poproś Administratora lub Zaufanego Opiekuna o link zaproszeniowy.
-                </span>
+                <span>Otrzymałeś nowy link ratunkowy lub zaproszeniowy?</span>
                 <button
                   type="button"
                   onClick={() => setShowManualInviteBox((v) => !v)}
@@ -1307,7 +1465,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 >
                   {showManualInviteBox
                     ? 'Ukryj pole linku'
-                    : 'Wklej otrzymany link / kod zaproszenia'}
+                    : 'Wklej otrzymany link'}
                 </button>
               </div>
 
@@ -1320,103 +1478,257 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                     type="text"
                     value={manualInviteInput}
                     onChange={(e) => setManualInviteInput(e.target.value)}
-                    placeholder="Wklej tutaj link zaproszeniowy..."
+                    placeholder="Wklej tutaj link od Administratora..."
                     className="flex-1 px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
                   />
                   <button
                     type="submit"
                     className="px-3.5 py-1.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
                   >
-                    Otwórz zaproszenie
+                    Otwórz link
                   </button>
                 </form>
               )}
             </div>
           </div>
+        </>
+      )}
 
-          {/* SECTION B: PRIMARY ADMINISTRATOR FIREBASE GOOGLE LOGIN */}
-          <div className="p-6 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-4">
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between gap-2 text-xs">
-                <span className="font-semibold text-[var(--vault-accent)]">
-                  02. Główny Administrator Skarbca (Firebase Auth + Cloud Firestore)
-                </span>
-                <span className="inline-flex items-center gap-1 font-mono text-[11px] text-[var(--vault-muted)] shrink-0">
-                  <Lock className="w-3 h-3 text-[var(--vault-success)]" />
-                  <span>E2E AES-256-GCM</span>
-                </span>
-              </div>
-              <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
-                Konto Głównego Administratora (
-                <strong>{rememberedAdminEmail || 'zainicjalizowane'}</strong>) jest chronione przez Firebase Auth z trwałym podtrzymywaniem sesji (<code>browserLocalPersistence</code>).
-              </p>
-            </div>
-
-            <div className="space-y-2">
+      {/* =====================================================================
+          MODE 3: ADMIN INSTANCE (After loading local Firebase Config JSON)
+         ===================================================================== */}
+      {!inviteToken && !isFamilyMemberMode && (
+        <div className="p-6 sm:p-7 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5 overflow-hidden">
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-[var(--vault-accent)]">
+                <Cloud className="w-4 h-4 shrink-0" />
+                <span>Instancja Głównego Administratora · Firebase Auth</span>
+              </span>
               <button
                 type="button"
-                onClick={() => handleAdminClick(false)}
-                disabled={isAdminLoading || isFamilyLoading}
-                className="gsi-material-button !w-full"
+                onClick={() => setShowChangeFirebaseConfigModal(true)}
+                className="inline-flex items-center gap-1 text-[11px] font-mono text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer"
+                title="Zmień lub podglądnij załadowany config Firebase JSON"
               >
-                <div className="gsi-material-button-content-wrapper">
-                  <div className="gsi-material-button-icon">
-                    <svg
-                      version="1.1"
-                      xmlns="http://www.w3.org/2000/svg"
-                      viewBox="0 0 48 48"
-                      style={{ display: 'block' }}
-                    >
-                      <path
-                        fill="#EA4335"
-                        d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                      ></path>
-                      <path
-                        fill="#4285F4"
-                        d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                      ></path>
-                      <path
-                        fill="#FBBC05"
-                        d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                      ></path>
-                      <path
-                        fill="#34A853"
-                        d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                      ></path>
-                      <path fill="none" d="M0 0h48v48H0z"></path>
-                    </svg>
-                  </div>
-                  <span className="gsi-material-button-contents">
-                    {isAdminLoading
-                      ? 'Odblokowywanie skarbca Administratora...'
-                      : rememberedAdminEmail
-                        ? `Zaloguj jako Administrator (${rememberedAdminEmail})`
-                        : 'Zaloguj jako Główny Administrator przez Google'}
-                  </span>
+                <Settings className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                <span>{fbInfo.projectId}</span>
+              </button>
+            </div>
+
+            <h1 className="text-xl font-bold font-display text-[var(--vault-text)]">
+              {isVaultInitialized
+                ? 'Odblokuj Skarbiec Głównego Administratora'
+                : 'Zaloguj przez Google i utwórz Skarbiec w Cloud Firestore'}
+            </h1>
+            <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
+              Konfiguracja Firebase (<code>{fbInfo.projectId}</code>) jest załadowana lokalnie na tym urządzeniu. Zaloguj się kontem Google, aby {isVaultInitialized ? 'wejść do panelu Administratora' : 'zainicjalizować nową instancję skarbca i zostać jej Administratorem'}.
+            </p>
+          </div>
+
+          {!isVaultInitialized && (
+            <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
+              <label className="block text-[11px] font-medium text-[var(--vault-muted)]">
+                Opcjonalne hasło główne Admina (ułatwia awaryjne logowanie loginem <code className="font-mono text-[var(--vault-accent)]">admin</code>)
+              </label>
+              <input
+                type="password"
+                value={adminMasterPasswordInput}
+                onChange={(e) => setAdminMasterPasswordInput(e.target.value)}
+                placeholder="Opcjonalne hasło (min. 4 znaki)..."
+                className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+              />
+            </div>
+          )}
+
+          {unauthorizedDomainHost && (
+            <div className="p-3.5 rounded-xl border border-[var(--vault-danger)] bg-[var(--vault-bg)] space-y-2.5 text-xs">
+              <div className="font-semibold text-[var(--vault-danger)]">
+                Wymagana jednorazowa autoryzacja domeny w Firebase Console (30 sek.):
+              </div>
+              <p className="text-[var(--vault-muted)] leading-relaxed">
+                Domena{' '}
+                <code className="font-mono font-bold text-[var(--vault-text)]">
+                  {unauthorizedDomainHost}
+                </code>{' '}
+                musi zostać dopisana do listy <strong>Authorized domains</strong> w projekcie Firebase (<code>{fbInfo.projectId}</code>).
+              </p>
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard
+                      .writeText(unauthorizedDomainHost)
+                      .catch(() => {});
+                    setCopiedDomainHost(true);
+                    setTimeout(() => setCopiedDomainHost(false), 2500);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] text-[var(--vault-text)] font-semibold cursor-pointer"
+                >
+                  {copiedDomainHost ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-[var(--vault-success)]" />
+                      <span>Skopiowano: {unauthorizedDomainHost}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                      <span>1. Kopiuj domenę ({unauthorizedDomainHost})</span>
+                    </>
+                  )}
+                </button>
+                <a
+                  href={`https://console.firebase.google.com/project/${fbInfo.projectId}/authentication/settings`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] text-[#FAF7F2] font-semibold"
+                >
+                  <span>2. Otwórz Firebase Console (Authorized domains)</span>
+                </a>
+              </div>
+            </div>
+          )}
+
+          {errorMsg && !unauthorizedDomainHost && (
+            <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
+              {errorMsg}
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={() => handleAdminClick(false)}
+              disabled={isAdminLoading || isFamilyLoading}
+              className="gsi-material-button !w-full"
+            >
+              <div className="gsi-material-button-content-wrapper">
+                <div className="gsi-material-button-icon">
+                  <svg
+                    version="1.1"
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 48 48"
+                    style={{ display: 'block' }}
+                  >
+                    <path
+                      fill="#EA4335"
+                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
+                    ></path>
+                    <path
+                      fill="#4285F4"
+                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
+                    ></path>
+                    <path
+                      fill="#FBBC05"
+                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
+                    ></path>
+                    <path
+                      fill="#34A853"
+                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
+                    ></path>
+                    <path fill="none" d="M0 0h48v48H0z"></path>
+                  </svg>
                 </div>
+                <span className="gsi-material-button-contents">
+                  {isAdminLoading
+                    ? 'Logowanie przez Firebase Auth...'
+                    : rememberedAdminEmail
+                      ? `Zaloguj jako Administrator (${rememberedAdminEmail})`
+                      : 'Zaloguj przez Google (Administrator)'}
+                </span>
+              </div>
+            </button>
+
+            {rememberedAdminEmail && (
+              <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
+                <span>
+                  Konto Admina:{' '}
+                  <strong className="text-[var(--vault-text)]">
+                    {rememberedAdminEmail}
+                  </strong>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => handleAdminClick(true)}
+                  disabled={isAdminLoading}
+                  className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
+                >
+                  Zmień konto Google
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Optional password / biometric unlock or switch to member mode */}
+          <div className="pt-3 border-t border-[var(--vault-border)] space-y-3 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
+              <button
+                type="button"
+                onClick={() =>
+                  setShowAdminFallbackPasswordLogin((prev) => !prev)
+                }
+                className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
+              >
+                {showAdminFallbackPasswordLogin
+                  ? 'Ukryj logowanie loginem i hasłem'
+                  : 'Logowanie awaryjne loginem i hasłem'}
               </button>
 
-              {rememberedAdminEmail && (
-                <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
-                  <span>
-                    Konto Admina:{' '}
-                    <strong className="text-[var(--vault-text)]">
-                      {rememberedAdminEmail}
-                    </strong>
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => handleAdminClick(true)}
-                    disabled={isAdminLoading || isFamilyLoading}
-                    className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer shrink-0"
-                  >
-                    Zmień konto Google
-                  </button>
-                </div>
-              )}
+              <button
+                type="button"
+                onClick={() => {
+                  clearCustomFirebaseConfig();
+                  setFirebaseReady(isFirebaseConfigured());
+                  setShowChangeFirebaseConfigModal(true);
+                }}
+                className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
+              >
+                Wgraj inny plik JSON Firebase
+              </button>
             </div>
+
+            {showAdminFallbackPasswordLogin && (
+              <form
+                onSubmit={handleFamilyLoginSubmit}
+                className="p-3.5 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-3"
+              >
+                <div>
+                  <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
+                    Login (np. admin)
+                  </label>
+                  <input
+                    type="text"
+                    value={loginUsername}
+                    onChange={(e) => setLoginUsername(e.target.value)}
+                    placeholder="admin"
+                    required
+                    className="w-full px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
+                    Hasło
+                  </label>
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Hasło..."
+                    required
+                    className="w-full px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)]"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isFamilyLoading}
+                  className="w-full py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer"
+                >
+                  Zaloguj loginem i hasłem
+                </button>
+              </form>
+            )}
           </div>
-        </>
+        </div>
       )}
     </div>
   );

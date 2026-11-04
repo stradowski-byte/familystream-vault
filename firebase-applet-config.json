@@ -1,12 +1,1 @@
-{
-  "projectId": "true-deployment-mfx4d",
-  "appId": "1:76581036729:web:9204da894c4e4c8054f168",
-  "apiKey": "AIzaSyCljb2jfgvvTOXA_W1SnnyIwK7rpeiiaKg",
-  "authDomain": "true-deployment-mfx4d.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-860a38fe-a7da-4ae2-aa28-b935a0d50074",
-  "storageBucket": "true-deployment-mfx4d.firebasestorage.app",
-  "messagingSenderId": "76581036729",
-  "measurementId": "",
-  "oAuthClientId": "76581036729-6sqbdcgu9sqbfuaoosogvkijad7i3nvs.apps.googleusercontent.com",
-  "recaptchaSiteKey": ""
-}
+{}

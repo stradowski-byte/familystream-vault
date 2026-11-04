@@ -13,7 +13,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { auth, db, isFirebaseConfigured } from './firebase';
 import {
   decryptPrivateRecordPayload,
   encryptPrivateRecordPayload,
@@ -181,6 +181,11 @@ export interface RealtimeVaultSnapshotCallbacks {
 export function subscribeToVaultFirestoreRealtime(
   callbacks: RealtimeVaultSnapshotCallbacks
 ): Unsubscribe {
+  if (!isFirebaseConfigured() || !db) {
+    callbacks.onInitialSyncComplete?.();
+    return () => {};
+  }
+
   const unsubscribers: Unsubscribe[] = [];
   let initialConfigLoaded = false;
   let initialMembersLoaded = false;

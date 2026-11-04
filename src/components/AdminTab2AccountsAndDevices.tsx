@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
+import { encodeFirebaseConfigForInviteUrl } from '../lib/firebase';
 import {
   ActivityLog,
   CoAdminPermissions,
@@ -166,6 +167,10 @@ export const AdminTab2AccountsAndDevices: React.FC<
         : '';
     const params = new URLSearchParams();
     params.set('invite', inv.token);
+    const fbEncoded = encodeFirebaseConfigForInviteUrl();
+    if (fbEncoded) {
+      params.set('fb', fbEncoded);
+    }
     return `${base}?${params.toString()}`;
   };
 

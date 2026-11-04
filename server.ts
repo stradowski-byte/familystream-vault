@@ -114,6 +114,7 @@ function collectProjectSourceFiles(rootDir: string): Array<{
     '.git',
     '.github',
     '.aistudio',
+    'aistudio',
   ]);
   const excludedFiles = new Set([
     '.env',
@@ -146,7 +147,12 @@ function collectProjectSourceFiles(rootDir: string): Array<{
           continue;
         }
         const buf = fs.readFileSync(fullPath);
-        if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+        if (entry.name === 'firebase-applet-config.json') {
+          results.push({
+            relativePath: relPath,
+            buffer: Buffer.from('{}\n', 'utf-8'),
+          });
+        } else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
           const cleanedText = stripAiStudioOnlyBlocks(buf.toString('utf-8'));
           results.push({
             relativePath: relPath,
@@ -186,6 +192,7 @@ function collectBuiltDistFiles(distDir: string): Array<{
         .join('/');
 
       if (entry.isDirectory()) {
+        if (entry.name === 'aistudio' || entry.name === '.aistudio') continue;
         walkDist(fullPath);
       } else if (entry.isFile()) {
         results.push({
@@ -668,7 +675,15 @@ async function startServer() {
       const newCommitSha = mainPush.commitSha;
 
       let ghPagesPublished = false;
+      const fbConfigPath = path.join(__dirname, 'firebase-applet-config.json');
+      const originalFbConfigContent = fs.existsSync(fbConfigPath)
+        ? fs.readFileSync(fbConfigPath, 'utf-8')
+        : null;
       try {
+        // Ensure production gh-pages bundle does not embed any Firebase keys in public repo
+        if (originalFbConfigContent !== null) {
+          fs.writeFileSync(fbConfigPath, '{}\n', 'utf-8');
+        }
         await buildViteBundle({
           root: __dirname,
           logLevel: 'silent',
@@ -685,6 +700,10 @@ async function startServer() {
         }
       } catch (buildOrPagesErr) {
         console.warn('Direct gh-pages build/push warning:', buildOrPagesErr);
+      } finally {
+        if (originalFbConfigContent !== null) {
+          fs.writeFileSync(fbConfigPath, originalFbConfigContent, 'utf-8');
+        }
       }
 
       const computedPagesUrl = `https://${cleanOwner.toLowerCase()}.github.io/${cleanRepo}/`;
