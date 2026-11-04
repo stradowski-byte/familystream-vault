@@ -21,6 +21,7 @@ import {
   exportActiveFirebaseConfigJson,
   getFirebaseProjectInfo,
 } from '../lib/firebase';
+import { FirebaseSetupGuideDropdown } from './FirebaseSetupGuideDropdown';
 
 interface AdminTab3ConfigAndBackupProps {
   vaultConfig: VaultConfig;
@@ -381,6 +382,10 @@ export const AdminTab3ConfigAndBackup: React.FC<
                 <span>Otwórz Firebase Authorized Domains</span>
               </a>
             </div>
+          </div>
+
+          <div className="pt-3 border-t border-[var(--vault-border)]">
+            <FirebaseSetupGuideDropdown />
           </div>
         </div>
 

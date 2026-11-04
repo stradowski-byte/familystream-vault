@@ -51,6 +51,7 @@ import {
   DetectedDeviceProfile,
   StoredBiometricProfile,
 } from '../lib/deviceAndBiometrics';
+import { FirebaseSetupGuideDropdown } from './FirebaseSetupGuideDropdown';
 
 interface AuthAndBootstrapViewProps {
   vaultConfig: VaultConfig | null;
@@ -680,6 +681,9 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             Publiczne repozytorium na GitHubie nie przechowuje żadnych kluczy Firebase. Wgraj swój plik <code className="font-mono text-[var(--vault-text)]">firebase-config.json</code> lub wklej obiekt konfiguracyjny poniżej — to wyzwoli utworzenie instancji Administratora i otworzy logowanie Google.
           </p>
         </div>
+
+        {/* Collapsible Step-by-Step Guide & Module Educational Explanation */}
+        <FirebaseSetupGuideDropdown />
 
         {/* Option A: 1-Tap File Upload (.json) */}
         <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-3">
@@ -1727,6 +1731,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 </button>
               </form>
             )}
+
+            <FirebaseSetupGuideDropdown />
           </div>
         </div>
       )}
