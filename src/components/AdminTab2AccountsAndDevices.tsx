@@ -33,10 +33,6 @@ import {
   PasswordRecord,
   VaultInvitation,
 } from '../types/vault';
-import {
-  encodeInviteMetadataPacket,
-  getGoogleAccessToken,
-} from '../lib/googleOAuthAndDriveSync';
 
 interface AdminTab2AccountsAndDevicesProps {
   members: Member[];
@@ -45,11 +41,6 @@ interface AdminTab2AccountsAndDevicesProps {
   invitations: VaultInvitation[];
   activityLogs: ActivityLog[];
   currentAdmin: Member;
-  driveSyncFileId?: string;
-  syncEncryptionKey?: string;
-  googleOAuthClientId?: string;
-  googleAccessToken?: string | null;
-  onRefreshFromGoogleDrive?: () => Promise<void>;
   onCreateInvitation: (params: {
     purpose: InvitationPurpose;
     mode: InvitationMode;
@@ -95,11 +86,6 @@ export const AdminTab2AccountsAndDevices: React.FC<
   invitations,
   activityLogs,
   currentAdmin,
-  driveSyncFileId,
-  syncEncryptionKey,
-  googleOAuthClientId,
-  googleAccessToken,
-  onRefreshFromGoogleDrive,
   onCreateInvitation,
   onDeleteInvitation,
   onApproveMemberAndDevices,
@@ -125,7 +111,6 @@ export const AdminTab2AccountsAndDevices: React.FC<
   const [latestCreatedInvite, setLatestCreatedInvite] =
     useState<VaultInvitation | null>(null);
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
-  const [isRefreshingDrive, setIsRefreshingDrive] = useState(false);
 
   // Account Merging state (Collapsible at bottom)
   const [isMergeSectionOpen, setIsMergeSectionOpen] = useState(false);
@@ -181,13 +166,6 @@ export const AdminTab2AccountsAndDevices: React.FC<
         : '';
     const params = new URLSearchParams();
     params.set('invite', inv.token);
-    if (driveSyncFileId) params.set('gdf', driveSyncFileId);
-    if (syncEncryptionKey) params.set('vkey', syncEncryptionKey);
-    if (googleOAuthClientId) params.set('cid', googleOAuthClientId);
-    const activeToken = googleAccessToken || getGoogleAccessToken() || '';
-    if (activeToken) params.set('dt', activeToken);
-    const encodedPacket = encodeInviteMetadataPacket(inv);
-    if (encodedPacket) params.set('ip', encodedPacket);
     return `${base}?${params.toString()}`;
   };
 
@@ -554,35 +532,9 @@ export const AdminTab2AccountsAndDevices: React.FC<
               01. Domownicy, Urządzenia, Zaufani Opiekunowie i Pomoc Awaryjna ({activeMembers.length})
             </h2>
             <p className="text-xs text-[var(--vault-muted)]">
-              Zarządzaj kontami rodziny, sprawdzaj liczniki haseł bez naruszania prywatności, mianuj osobę zaufaną <strong>Zaufanym Opiekunem (Co-Adminem)</strong> oraz w każdej chwili zresetuj zapomniany login lub hasło domownikowi.
+              Zarządzaj kontami rodziny, sprawdzaj liczniki haseł bez naruszania prywatności, mianuj osobę zaufaną <strong>Zaufanym Opiekunem (Co-Adminem)</strong> oraz w każdej chwili zresetuj zapomniany login lub hasło domownikowi. Zmiany synchronizują się w czasie rzeczywistym przez Cloud Firestore (<code className="font-mono">onSnapshot</code>).
             </p>
           </div>
-          {onRefreshFromGoogleDrive && (
-            <button
-              type="button"
-              disabled={isRefreshingDrive}
-              onClick={async () => {
-                setIsRefreshingDrive(true);
-                try {
-                  await onRefreshFromGoogleDrive();
-                } finally {
-                  setIsRefreshingDrive(false);
-                }
-              }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[var(--vault-text)] border border-[var(--vault-accent)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg transition-colors cursor-pointer shrink-0 self-start sm:self-center"
-            >
-              <RefreshCw
-                className={`w-3.5 h-3.5 text-[var(--vault-accent)] ${
-                  isRefreshingDrive ? 'animate-spin' : ''
-                }`}
-              />
-              <span>
-                {isRefreshingDrive
-                  ? 'Pobieranie z Google Drive...'
-                  : 'Odśwież zgłoszenia z Google Drive'}
-              </span>
-            </button>
-          )}
         </div>
 
         {/* Highlight box if a quick recovery link was just generated from a member card */}

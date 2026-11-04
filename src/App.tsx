@@ -10,13 +10,36 @@ import {
   Eraser,
 } from 'lucide-react';
 import {
+  onAuthStateChanged,
+  signOut,
+  User as FirebaseUser,
+} from 'firebase/auth';
+import { auth, testFirestoreConnection } from './lib/firebase';
+import {
+  appendActivityLogToFirestore,
+  consumeInvitationTokenInFirestore,
+  createInvitationInFirestore,
+  decryptPrivatePasswordsInMemory,
+  deleteDeviceFromFirestore,
+  deleteInvitationFromFirestore,
+  deleteMemberFromFirestore,
+  deletePasswordFromFirestore,
+  mergeMembersInFirestore,
+  rebindDeviceCertificateInFirestore,
+  replaceFullVaultStateInFirestore,
+  saveDeviceToFirestore,
+  saveMemberToFirestore,
+  savePasswordToFirestore,
+  saveVaultConfigToFirestore,
+  subscribeToVaultFirestoreRealtime,
+} from './lib/firestoreVaultService';
+import {
   ActivityLog,
   BackupFileStructure,
   CoAdminPermissions,
   DecryptedPrivatePayload,
   DEFAULT_CATEGORIES,
   Device,
-  getEffectiveCoAdminPermissions,
   InvitationMode,
   InvitationPurpose,
   isAdminOrCoAdmin,
@@ -27,52 +50,11 @@ import {
   PasswordRecord,
   SubAccountEntry,
   ThemeMode,
-  VaultBootstrapStatus,
   VaultCategory,
   VaultConfig,
   VaultInvitation,
 } from './types/vault';
 import {
-  appendActivityLogOnServer,
-  consumeInvitationTokenOnServer,
-  createInvitationOnServer,
-  deleteDeviceOnServer,
-  deleteInvitationOnServer,
-  deleteMemberOnServer,
-  deletePasswordOnServer,
-  establishVaultSessionOnServer,
-  fetchBootstrapStatusFromServer,
-  fetchVaultStateFromServer,
-  mergeMembersOnServer,
-  rebindDeviceCertificateOnServer,
-  replaceVaultStateOnServer,
-  saveDeviceOnServer,
-  saveDriveSyncFileIdOnServer,
-  saveMemberOnServer,
-  savePasswordOnServer,
-  saveVaultConfigOnServer,
-  ServerVaultState,
-  setVaultApiSessionContext,
-} from './lib/vaultApiClient';
-import {
-  connectGoogleDriveOAuthDirect,
-  decodeInviteMetadataPacket,
-  downloadVaultBackupFromDrive,
-  getGoogleAccessToken,
-  getOAuthClientId,
-  loadPublicRuntimeOAuthConfig,
-  loadPwaHandoffParameters,
-  pullSharedVaultStateFromAdminDriveForMember,
-  pullVaultStateFromDriveAutoSync,
-  pushMemberRegistrationToSharedAdminDrive,
-  pushVaultStateToDriveAutoSync,
-  setConfiguredGoogleOAuthClientId,
-  signInWithGoogleAdminDirect,
-  syncSavedAdminFromVaultState,
-  uploadEncryptedVaultToDrive,
-} from './lib/googleOAuthAndDriveSync';
-import {
-  decryptPrivateRecordPayload,
   decryptVaultBackupFile,
   encryptPrivateRecordPayload,
   encryptVaultBackupFile,
@@ -123,8 +105,7 @@ function makeId(prefix: string): string {
 
 export default function App() {
   const isOnline = useOnlineStatus();
-  const { isInstallable, isInstalled, isIOS, install: installPWA } =
-    usePWAInstall();
+  const { isInstallable, isInstalled, install: installPWA } = usePWAInstall();
   const [showIOSInstallModal, setShowIOSInstallModal] = useState(false);
 
   const detectedDevice = useMemo(() => getDetectedDeviceProfile(), []);
@@ -132,11 +113,8 @@ export default function App() {
   // Theme state (Low-Contrast: Soft Slate Dusk vs Warm Linen Paper)
   const [theme, setTheme] = useState<ThemeMode>('dusk');
 
-  // Server-synchronized collections (Zero Firebase)
+  // Cloud Firestore real-time collections (onSnapshot)
   const [isInitialLoading, setIsInitialLoading] = useState(true);
-  const [bootstrapStatus, setBootstrapStatus] =
-    useState<VaultBootstrapStatus | null>(null);
-  const [syncEncryptionKey, setSyncEncryptionKey] = useState<string>('');
   const [isUpdatingApp, setIsUpdatingApp] = useState(false);
   const [vaultConfig, setVaultConfig] = useState<VaultConfig | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -144,10 +122,6 @@ export default function App() {
   const [passwords, setPasswords] = useState<PasswordRecord[]>([]);
   const [invitations, setInvitations] = useState<VaultInvitation[]>([]);
   const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
-  const [driveSyncFileId, setDriveSyncFileId] = useState<string>('');
-  const [lastDriveAutoSyncAt, setLastDriveAutoSyncAt] = useState<string | null>(
-    null
-  );
 
   // Active authenticated session in memory
   const [currentMemberId, setCurrentMemberId] = useState<string | null>(null);
@@ -163,7 +137,7 @@ export default function App() {
     passwordPlain?: string;
   } | null>(null);
 
-  // Decrypted private records cache in memory (ONLY for currentMember)
+  // Decrypted private records cache in memory (ONLY for currentMember — E2E client-side)
   const [decryptedPrivateMap, setDecryptedPrivateMap] = useState<
     Record<string, DecryptedPrivatePayload>
   >({});
@@ -171,11 +145,6 @@ export default function App() {
   // Biometric profile on this device
   const [biometricProfile, setBiometricProfile] =
     useState<StoredBiometricProfile | null>(() => getStoredBiometricProfile());
-
-  // Direct Google OAuth token in memory (for automatic Google Drive sync)
-  const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(
-    () => getGoogleAccessToken()
-  );
 
   // UI Navigation & Filtering state
   const [activeAdminTab, setActiveAdminTab] = useState<AdminTabId>('vault');
@@ -206,89 +175,116 @@ export default function App() {
     }
   }, [theme]);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     setTimeout(() => {
       setToastMessage((prev) => (prev === msg ? null : prev));
     }, 3500);
-  };
-
-  // Apply server state snapshot to React state
-  const applyServerState = useCallback((state: ServerVaultState) => {
-    const safeMembers = Array.isArray(state.members) ? state.members : [];
-    setVaultConfig(state.vaultConfig || null);
-    setMembers(safeMembers);
-    setDevices(Array.isArray(state.devices) ? state.devices : []);
-    setPasswords(Array.isArray(state.passwords) ? state.passwords : []);
-    setInvitations(Array.isArray(state.invitations) ? state.invitations : []);
-    setActivityLogs(Array.isArray(state.activityLogs) ? state.activityLogs : []);
-    if (state.driveSyncFileId) {
-      setDriveSyncFileId(state.driveSyncFileId);
-    }
-    if (state.syncEncryptionKey) {
-      setSyncEncryptionKey(state.syncEncryptionKey);
-    }
-    if (state.bootstrapStatus) {
-      setBootstrapStatus(state.bootstrapStatus);
-      if (state.bootstrapStatus.googleOAuthClientId) {
-        setConfiguredGoogleOAuthClientId(
-          state.bootstrapStatus.googleOAuthClientId
-        );
-      }
-    }
-    // Automatically detect and remember Admin account from the vault database
-    syncSavedAdminFromVaultState(state.vaultConfig, safeMembers);
-
-    // Restore remembered active session when reopening the PWA if valid
-    try {
-      const rawSession = localStorage.getItem(REMEMBERED_SESSION_KEY);
-      if (rawSession) {
-        const parsedSession = JSON.parse(rawSession) as RememberedVaultSession;
-        if (
-          parsedSession?.memberId &&
-          parsedSession?.dekBase64 &&
-          safeMembers.some(
-            (m) => m.id === parsedSession.memberId && m.status === 'active'
-          )
-        ) {
-          setCurrentMemberId((prev) => prev || parsedSession.memberId);
-          setActiveDekBase64((prev) => prev || parsedSession.dekBase64);
-          setActiveMergedDeks((prev) =>
-            prev.length > 0 ? prev : parsedSession.mergedDeks || []
-          );
-        }
-      }
-    } catch {
-      // ignore storage errors
-    }
   }, []);
 
-  // Automatically push the latest server state to the single constant encrypted file `FamilyStreamVault_AutoSync.vault.enc` (AES-256-GCM) on Google Drive
-  const triggerAutoSyncToGoogleDrive = useCallback(
-    async (latestState: ServerVaultState, explicitToken?: string | null) => {
-      const tokenToUse =
-        explicitToken || googleAccessToken || getGoogleAccessToken();
-      if (!tokenToUse) return;
+  // Test connection to Cloud Firestore on boot & subscribe to real-time onSnapshot listeners
+  useEffect(() => {
+    void testFirestoreConnection();
 
+    const unsubscribe = subscribeToVaultFirestoreRealtime({
+      onVaultConfig: (cfg) => setVaultConfig(cfg),
+      onMembers: (list) => setMembers(list),
+      onDevices: (list) => setDevices(list),
+      onPasswords: (list) => setPasswords(list),
+      onInvitations: (list) => setInvitations(list),
+      onActivityLogs: (list) => setActivityLogs(list),
+      onInitialSyncComplete: () => setIsInitialLoading(false),
+    });
+
+    const fallbackTimer = window.setTimeout(() => {
+      setIsInitialLoading(false);
+    }, 2500);
+
+    return () => {
+      window.clearTimeout(fallbackTimer);
+      unsubscribe();
+    };
+  }, []);
+
+  // Restore remembered session OR native Firebase Auth Admin session when members load from Firestore
+  useEffect(() => {
+    if (currentMemberId || isVaultLockedByTimeout || members.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const tryRestoreSession = async () => {
+      // 1. Check remembered session in localStorage (works for both Admin and Family Members)
       try {
-        const { fileId, modifiedTime } = await pushVaultStateToDriveAutoSync({
-          accessToken: tokenToUse,
-          state: latestState,
-          knownFileId: latestState.driveSyncFileId || driveSyncFileId,
-          syncEncryptionKey:
-            latestState.syncEncryptionKey || syncEncryptionKey,
-        });
-        setLastDriveAutoSyncAt(modifiedTime);
-        if (fileId && fileId !== latestState.driveSyncFileId) {
-          setDriveSyncFileId(fileId);
-          await saveDriveSyncFileIdOnServer(fileId).catch(() => {});
+        const rawSession = localStorage.getItem(REMEMBERED_SESSION_KEY);
+        if (rawSession) {
+          const parsedSession = JSON.parse(rawSession) as RememberedVaultSession;
+          if (
+            parsedSession?.memberId &&
+            parsedSession?.dekBase64 &&
+            members.some(
+              (m) => m.id === parsedSession.memberId && m.status === 'active'
+            )
+          ) {
+            if (!cancelled) {
+              setCurrentMemberId(parsedSession.memberId);
+              setActiveDekBase64(parsedSession.dekBase64);
+              setActiveMergedDeks(parsedSession.mergedDeks || []);
+            }
+            return;
+          }
         }
-      } catch (err) {
-        console.warn('Google Drive Auto-Sync background warning:', err);
+      } catch {
+        // ignore storage errors
       }
-    },
-    [googleAccessToken, driveSyncFileId, syncEncryptionKey]
-  );
+
+      // 2. Check native Firebase Auth user (browserLocalPersistence) for Primary Admin
+      const fbUser = auth.currentUser;
+      if (fbUser) {
+        const adminMember = members.find(
+          (m) =>
+            m.googleUid === fbUser.uid ||
+            m.role === 'admin' ||
+            m.username.toLowerCase() === 'admin'
+        );
+        if (adminMember && adminMember.vaultEscrowKey) {
+          try {
+            const dekBase64 = await unwrapDekFromMergeEscrow(
+              adminMember.vaultEscrowKey,
+              adminMember.pbkdf2Salt
+            );
+            let mergedDeks: string[] = [];
+            try {
+              const parsed = JSON.parse(
+                adminMember.mergedVaultKeysJson || '[]'
+              );
+              if (Array.isArray(parsed)) mergedDeks = parsed;
+            } catch {
+              mergedDeks = [];
+            }
+            if (!cancelled) {
+              setCurrentMemberId(adminMember.id);
+              setActiveDekBase64(dekBase64);
+              setActiveMergedDeks(mergedDeks);
+            }
+          } catch (err) {
+            console.warn('Auto-restore Admin DEK warning:', err);
+          }
+        }
+      }
+    };
+
+    tryRestoreSession();
+    const unsubAuth = onAuthStateChanged(auth, () => {
+      tryRestoreSession();
+    });
+
+    return () => {
+      cancelled = true;
+      unsubAuth();
+    };
+  }, [members, currentMemberId, isVaultLockedByTimeout]);
 
   // Start clipboard auto-clear countdown
   const startClipboardCountdown = (seconds: number, label: string) => {
@@ -311,78 +307,10 @@ export default function App() {
     }, 1000);
   };
 
-  // Non-destructive application update handler: downloads latest PWA bundle from GitHub Pages, syncs Google Drive state, activates new Service Worker, and reloads automatically
+  // Non-destructive application update handler: purges outdated Workbox caches, activates new Service Worker, and reloads
   const handleTriggerAppUpdate = useCallback(async () => {
     setIsUpdatingApp(true);
     try {
-      setVaultApiSessionContext({
-        deviceFingerprint: detectedDevice.deviceFingerprint,
-      });
-
-      // 1. Refresh public OAuth config & sync latest encrypted database from Google Drive (Admin or Family Member shared file)
-      await loadPublicRuntimeOAuthConfig().catch(() => '');
-
-      const activeGoogleToken = googleAccessToken || getGoogleAccessToken();
-      if (activeGoogleToken) {
-        try {
-          const pulled = await pullVaultStateFromDriveAutoSync(
-            activeGoogleToken,
-            syncEncryptionKey
-          );
-          if (
-            pulled &&
-            pulled.state &&
-            Array.isArray(pulled.state.members) &&
-            pulled.state.members.length > 0
-          ) {
-            await replaceVaultStateOnServer({
-              ...pulled.state,
-              driveSyncFileId: pulled.fileId,
-              syncEncryptionKey:
-                pulled.syncEncryptionKey || syncEncryptionKey,
-            });
-          }
-        } catch (driveErr) {
-          console.warn('Auto-Sync pull during app update:', driveErr);
-        }
-      } else if (driveSyncFileId && syncEncryptionKey) {
-        try {
-          const sharedPulled = await pullSharedVaultStateFromAdminDriveForMember(
-            {
-              driveFileId: driveSyncFileId,
-              syncEncryptionKey,
-            }
-          );
-          if (
-            sharedPulled &&
-            sharedPulled.state &&
-            Array.isArray(sharedPulled.state.members) &&
-            sharedPulled.state.members.length > 0
-          ) {
-            await replaceVaultStateOnServer({
-              ...sharedPulled.state,
-              driveSyncFileId,
-              syncEncryptionKey,
-            });
-          }
-        } catch (sharedErr) {
-          console.warn('Shared Drive pull during app update:', sharedErr);
-        }
-      }
-
-      const [latestBoot, latestState] = await Promise.all([
-        fetchBootstrapStatusFromServer().catch(() => null),
-        fetchVaultStateFromServer(),
-      ]);
-      if (latestBoot) {
-        setBootstrapStatus(latestBoot);
-        if (latestBoot.googleOAuthClientId) {
-          setConfiguredGoogleOAuthClientId(latestBoot.googleOAuthClientId);
-        }
-      }
-      applyServerState(latestState);
-
-      // 2. Purge outdated Workbox asset caches (while preserving PWA handoff cache)
       if ('caches' in window) {
         const cacheKeys = await window.caches.keys();
         for (const key of cacheKeys) {
@@ -392,7 +320,6 @@ export default function App() {
         }
       }
 
-      // 3. Force network download of the newest HTML & manifest from GitHub Pages
       await Promise.all([
         fetch(`./index.html?pwa_update=${Date.now()}`, {
           cache: 'reload',
@@ -402,7 +329,6 @@ export default function App() {
         }).catch(() => null),
       ]);
 
-      // 4. Update & activate Service Worker immediately
       if ('serviceWorker' in navigator) {
         const registrations = await navigator.serviceWorker.getRegistrations();
         for (const reg of registrations) {
@@ -427,13 +353,7 @@ export default function App() {
       );
       setIsUpdatingApp(false);
     }
-  }, [
-    applyServerState,
-    detectedDevice.deviceFingerprint,
-    driveSyncFileId,
-    googleAccessToken,
-    syncEncryptionKey,
-  ]);
+  }, [showToast]);
 
   const handleInstallPWAOrGuide = useCallback(async () => {
     if (isInstallable) {
@@ -442,117 +362,6 @@ export default function App() {
       setShowIOSInstallModal(true);
     }
   }, [isInstallable, installPWA]);
-
-  // Poll server state on initial boot and every 4 seconds for real-time family sync
-  useEffect(() => {
-    let active = true;
-    let tickCount = 0;
-    setVaultApiSessionContext({
-      deviceFingerprint: detectedDevice.deviceFingerprint,
-    });
-
-    const loadFromServer = async () => {
-      tickCount += 1;
-      try {
-        // Every 2nd tick (~8s), if a Family Member is waiting for approval in pendingAuthState OR if Admin is on Tab 2 ('approvals'), also check Google Drive for cross-device updates on static GitHub Pages!
-        if (tickCount % 2 === 0) {
-          if (pendingAuthState) {
-            try {
-              const handoff = await loadPwaHandoffParameters();
-              const effectiveFileId =
-                driveSyncFileId || handoff?.driveFileId || '';
-              const effectiveSyncKey =
-                syncEncryptionKey || handoff?.syncEncryptionKey || '';
-              if (effectiveFileId && effectiveSyncKey) {
-                const sharedPulled =
-                  await pullSharedVaultStateFromAdminDriveForMember({
-                    driveFileId: effectiveFileId,
-                    syncEncryptionKey: effectiveSyncKey,
-                    driveAccessToken: handoff?.driveAccessToken,
-                  });
-                if (
-                  sharedPulled &&
-                  sharedPulled.state &&
-                  Array.isArray(sharedPulled.state.members) &&
-                  sharedPulled.state.members.length > 0
-                ) {
-                  await replaceVaultStateOnServer({
-                    ...sharedPulled.state,
-                    driveSyncFileId: effectiveFileId,
-                    syncEncryptionKey: effectiveSyncKey,
-                  });
-                }
-              }
-            } catch {
-              // ignore background polling error
-            }
-          } else if (
-            activeAdminTab === 'approvals' &&
-            (googleAccessToken || getGoogleAccessToken())
-          ) {
-            try {
-              const token = googleAccessToken || getGoogleAccessToken();
-              if (token) {
-                const pulled = await pullVaultStateFromDriveAutoSync(
-                  token,
-                  syncEncryptionKey
-                );
-                if (
-                  pulled &&
-                  pulled.state &&
-                  Array.isArray(pulled.state.members) &&
-                  pulled.state.members.length > 0
-                ) {
-                  await replaceVaultStateOnServer({
-                    ...pulled.state,
-                    driveSyncFileId: pulled.fileId,
-                    syncEncryptionKey:
-                      pulled.syncEncryptionKey || syncEncryptionKey,
-                  });
-                }
-              }
-            } catch {
-              // ignore background polling error
-            }
-          }
-        }
-
-        const [boot, state] = await Promise.all([
-          fetchBootstrapStatusFromServer().catch(() => null),
-          fetchVaultStateFromServer(),
-        ]);
-        if (active) {
-          if (boot) {
-            setBootstrapStatus(boot);
-            if (boot.googleOAuthClientId) {
-              setConfiguredGoogleOAuthClientId(boot.googleOAuthClientId);
-            }
-          }
-          applyServerState(state);
-          setIsInitialLoading(false);
-        }
-      } catch (err) {
-        console.warn('Błąd pobierania stanu z serwera:', err);
-        if (active) setIsInitialLoading(false);
-      }
-    };
-
-    loadFromServer();
-    const intervalId = window.setInterval(loadFromServer, 4000);
-
-    return () => {
-      active = false;
-      window.clearInterval(intervalId);
-    };
-  }, [
-    applyServerState,
-    detectedDevice.deviceFingerprint,
-    pendingAuthState,
-    activeAdminTab,
-    driveSyncFileId,
-    syncEncryptionKey,
-    googleAccessToken,
-  ]);
 
   // Current logged-in member object
   const currentMember = useMemo(() => {
@@ -572,7 +381,7 @@ export default function App() {
     return found.status === 'active' ? found : null;
   }, [members, currentMemberId, vaultConfig?.adminMemberId]);
 
-  // Watch pendingAuthState: if Admin or Co-Admin approves the member & device, automatically seal the Hardware Certificate Envelope and unlock the vault!
+  // Watch pendingAuthState: if Admin or Co-Admin approves the member & device in Firestore (onSnapshot), automatically seal the Hardware Certificate Envelope and unlock the vault!
   useEffect(() => {
     if (!pendingAuthState) return;
     const liveMember = members.find((m) => m.id === pendingAuthState.member.id);
@@ -611,17 +420,14 @@ export default function App() {
                 deviceApprovalToken: liveDevice.deviceApprovalToken,
               }
             );
-            const updatedState = await saveDeviceOnServer(liveDevice.id, {
+            await saveDeviceToFirestore(liveDevice.id, {
+              ...liveDevice,
               hardwareWrappedDek: hwWrapped,
               hardwareModelOs: detectedDevice.hardwareModelOs,
               hardwareDeviceType: detectedDevice.hardwareDeviceType,
               hardwareSignatureHash: detectedDevice.hardwareSignatureHash,
               lastSeenAt: new Date().toISOString(),
             });
-            applyServerState(updatedState);
-            await pushMemberRegistrationToSharedAdminDrive(updatedState).catch(
-              () => false
-            );
           } catch (err) {
             console.warn('Automatic hardware envelope seal warning:', err);
           }
@@ -631,20 +437,14 @@ export default function App() {
         setActiveMergedDeks(pendingAuthState.mergedDeksBase64);
         setPendingAuthState(null);
         showToast(
-          'Certyfikat sprzętowy został wydany, a Twoje konto i urządzenie zaakceptowane! Skarbiec odblokowany.'
+          'Certyfikat sprzętowy został wydany w Cloud Firestore, a Twoje konto i urządzenie zaakceptowane! Skarbiec odblokowany.'
         );
       };
       finalizeHardwareUnlock();
     }
-  }, [
-    members,
-    devices,
-    pendingAuthState,
-    detectedDevice,
-    applyServerState,
-  ]);
+  }, [members, devices, pendingAuthState, detectedDevice, showToast]);
 
-  // Decrypt current user's private records in RAM
+  // Decrypt current user's private records in RAM strictly on the client (E2E AES-256-GCM)
   useEffect(() => {
     let cancelled = false;
     async function decryptOwnerRecords() {
@@ -652,20 +452,12 @@ export default function App() {
         setDecryptedPrivateMap({});
         return;
       }
-      const myPrivateRecords = passwords.filter(
-        (p) => p.section === 'private' && p.ownerId === currentMember.id
+      const nextMap = await decryptPrivatePasswordsInMemory(
+        passwords,
+        currentMember.id,
+        activeDekBase64,
+        activeMergedDeks
       );
-      const nextMap: Record<string, DecryptedPrivatePayload> = {};
-      for (const rec of myPrivateRecords) {
-        const decrypted = await decryptPrivateRecordPayload(
-          rec.encryptedPayload,
-          activeDekBase64,
-          activeMergedDeks
-        );
-        if (decrypted) {
-          nextMap[rec.id] = decrypted;
-        }
-      }
       if (!cancelled) {
         setDecryptedPrivateMap(nextMap);
       }
@@ -739,13 +531,12 @@ export default function App() {
     }
   }, [vaultConfig?.categoriesJson]);
 
-  // Helper to log activity on the server and trigger Google Drive Auto-Sync
-  const logActivityAndSync = async (
+  // Helper to log activity in Cloud Firestore
+  const logActivityInFirestore = async (
     actorId: string,
     actorName: string,
     actionType: string,
-    details: string,
-    explicitToken?: string | null
+    details: string
   ) => {
     const logId = makeId('log');
     const entry: ActivityLog = {
@@ -757,85 +548,21 @@ export default function App() {
       deviceInfo: detectedDevice.deviceName.slice(0, 190),
       timestamp: new Date().toISOString(),
     };
-    const updatedState = await appendActivityLogOnServer(entry);
-    applyServerState(updatedState);
-    await triggerAutoSyncToGoogleDrive(updatedState, explicitToken);
-    return updatedState;
+    await appendActivityLogToFirestore(entry);
   };
 
-  // 1. FIRST-ADMIN CLAIM & ADMIN GOOGLE LOGIN (Automatically detects Admin from vault database for 1-click login without Google window!)
-  const handleAdminGoogleLogin = async (options?: {
-    email?: string;
-    displayName?: string;
+  // 1. PRIMARY ADMIN LOGIN VIA FIREBASE AUTH (Google Sign-In with browserLocalPersistence)
+  const handleAdminGoogleLogin = async (options: {
+    firebaseUser: FirebaseUser;
     masterPassword?: string;
-    skipOAuthPopup?: boolean;
-    forceAccountChooser?: boolean;
   }) => {
-    const existingAdminInDb = members.find(
-      (m) => m.role === 'admin' || m.username.toLowerCase() === 'admin'
-    );
-    const detectedDbEmail =
-      options?.email ||
-      (vaultConfig?.adminEmail && !vaultConfig.adminEmail.endsWith('.local')
-        ? vaultConfig.adminEmail
-        : undefined);
-    const identity = await signInWithGoogleAdminDirect({
-      email: !options?.forceAccountChooser ? detectedDbEmail : undefined,
-      displayName: !options?.forceAccountChooser
-        ? options?.displayName || existingAdminInDb?.fullName
-        : undefined,
-      skipOAuthPopup: options?.skipOAuthPopup,
-      forceAccountChooser: options?.forceAccountChooser,
-    });
-    if (identity.accessToken) {
-      setGoogleAccessToken(identity.accessToken);
-    }
-
-    const sessionHandshake = await establishVaultSessionOnServer({
-      mode: 'admin_google',
-      googleEmail: identity.email,
-      googleUid: identity.uid,
-      deviceFingerprint: detectedDevice.deviceFingerprint,
-      deviceName: detectedDevice.deviceName,
-    });
-    let serverState = sessionHandshake.state;
-    let activeSyncKey =
-      sessionHandshake.syncEncryptionKey || syncEncryptionKey;
-
-    // ALWAYS check the selected Google Account's Google Drive for an existing `FamilyStreamVault_AutoSync.vault.enc` file!
-    let restoredExistingVaultFromDrive = false;
-    if (identity.accessToken) {
-      try {
-        const pulled = await pullVaultStateFromDriveAutoSync(
-          identity.accessToken,
-          activeSyncKey
-        );
-        if (
-          pulled &&
-          pulled.state &&
-          Array.isArray(pulled.state.members) &&
-          pulled.state.members.length > 0
-        ) {
-          restoredExistingVaultFromDrive = true;
-          if (pulled.syncEncryptionKey) {
-            activeSyncKey = pulled.syncEncryptionKey;
-            setSyncEncryptionKey(pulled.syncEncryptionKey);
-          }
-          serverState = await replaceVaultStateOnServer({
-            ...pulled.state,
-            driveSyncFileId: pulled.fileId,
-            syncEncryptionKey: activeSyncKey,
-          });
-          setDriveSyncFileId(pulled.fileId);
-          setLastDriveAutoSyncAt(new Date().toISOString());
-        }
-      } catch (err) {
-        console.warn('Sprawdzanie Google Drive przy logowaniu:', err);
-      }
-    }
+    const { firebaseUser, masterPassword } = options;
+    const email = firebaseUser.email || 'admin@familystream.local';
+    const uid = firebaseUser.uid;
+    const displayName = firebaseUser.displayName || 'Główny Administrator';
 
     const now = new Date().toISOString();
-    let adminMember = serverState.members.find(
+    let adminMember = members.find(
       (m) => m.role === 'admin' || m.username.toLowerCase() === 'admin'
     );
     let dekBase64: string;
@@ -844,12 +571,12 @@ export default function App() {
     if (!adminMember) {
       isFirstBootstrap = true;
       const adminMemberId =
-        serverState.vaultConfig?.adminMemberId || makeId('mem_admin');
+        vaultConfig?.adminMemberId || makeId('mem_admin');
       const salt = generateSaltBase64(16);
       const effectivePassword =
-        options?.masterPassword && options.masterPassword.trim().length >= 4
-          ? options.masterPassword.trim()
-          : `google_admin_${identity.uid}_${salt}`;
+        masterPassword && masterPassword.trim().length >= 4
+          ? masterPassword.trim()
+          : `google_admin_${uid}_${salt}`;
       const passwordHash = await hashPasswordForAuth(effectivePassword, salt);
       dekBase64 = generateRandomDekBase64();
       const wrappedMasterKey = await wrapDekWithPassword(
@@ -861,7 +588,7 @@ export default function App() {
 
       adminMember = {
         id: adminMemberId,
-        fullName: identity.displayName || 'Główny Administrator',
+        fullName: displayName,
         username: 'admin',
         passwordHash,
         pbkdf2Salt: salt,
@@ -870,49 +597,47 @@ export default function App() {
         mergedVaultKeysJson: '[]',
         role: 'admin',
         status: 'active',
-        googleUid: identity.uid,
+        googleUid: uid,
         createdAt: now,
         updatedAt: now,
       };
 
       const configDoc: VaultConfig = {
         initialized: true,
-        adminUid: identity.uid,
-        adminEmail: identity.email,
+        adminUid: uid,
+        adminEmail: email,
         adminMemberId,
         templatesLoaded: false,
         categoriesJson: JSON.stringify(DEFAULT_CATEGORIES),
         defaultTheme: theme,
         clipboardClearSeconds: 30,
         autoLockMinutes: 15,
-        createdAt: serverState.vaultConfig?.createdAt || now,
+        createdAt: vaultConfig?.createdAt || now,
         updatedAt: now,
       };
 
-      await saveVaultConfigOnServer(configDoc);
-      serverState = await saveMemberOnServer(adminMember.id, adminMember);
+      await saveVaultConfigToFirestore(configDoc);
+      await saveMemberToFirestore(adminMember.id, adminMember);
     } else {
       const shouldUpdateIdentity =
         adminMember.role !== 'admin' ||
         adminMember.status !== 'active' ||
-        adminMember.googleUid !== identity.uid ||
-        (identity.displayName &&
-          adminMember.fullName === 'Główny Administrator');
+        adminMember.googleUid !== uid ||
+        (displayName && adminMember.fullName === 'Główny Administrator');
 
       if (shouldUpdateIdentity) {
         adminMember = {
           ...adminMember,
           fullName:
-            adminMember.fullName === 'Główny Administrator' &&
-            identity.displayName
-              ? identity.displayName
+            adminMember.fullName === 'Główny Administrator' && displayName
+              ? displayName
               : adminMember.fullName,
           role: 'admin',
           status: 'active',
-          googleUid: identity.uid,
+          googleUid: uid,
           updatedAt: now,
         };
-        serverState = await saveMemberOnServer(adminMember.id, adminMember);
+        await saveMemberToFirestore(adminMember.id, adminMember);
       }
 
       dekBase64 = await unwrapDekFromMergeEscrow(
@@ -920,37 +645,32 @@ export default function App() {
         adminMember.pbkdf2Salt
       );
 
-      const isLocalPlaceholderEmail =
-        !serverState.vaultConfig?.adminEmail ||
-        serverState.vaultConfig.adminEmail.endsWith('.local');
-
       if (
-        !serverState.vaultConfig ||
-        !serverState.vaultConfig.initialized ||
-        isLocalPlaceholderEmail
+        !vaultConfig ||
+        !vaultConfig.initialized ||
+        vaultConfig.adminUid !== uid ||
+        vaultConfig.adminEmail !== email
       ) {
         const configDoc: VaultConfig = {
           initialized: true,
-          adminUid: identity.uid,
-          adminEmail: identity.email,
+          adminUid: uid,
+          adminEmail: email,
           adminMemberId: adminMember.id,
-          templatesLoaded: serverState.vaultConfig?.templatesLoaded ?? false,
+          templatesLoaded: vaultConfig?.templatesLoaded ?? false,
           categoriesJson:
-            serverState.vaultConfig?.categoriesJson ||
-            JSON.stringify(DEFAULT_CATEGORIES),
-          defaultTheme: serverState.vaultConfig?.defaultTheme || theme,
-          clipboardClearSeconds:
-            serverState.vaultConfig?.clipboardClearSeconds || 30,
-          autoLockMinutes: serverState.vaultConfig?.autoLockMinutes || 15,
-          createdAt: serverState.vaultConfig?.createdAt || now,
+            vaultConfig?.categoriesJson || JSON.stringify(DEFAULT_CATEGORIES),
+          defaultTheme: vaultConfig?.defaultTheme || theme,
+          clipboardClearSeconds: vaultConfig?.clipboardClearSeconds || 30,
+          autoLockMinutes: vaultConfig?.autoLockMinutes || 15,
+          createdAt: vaultConfig?.createdAt || now,
           updatedAt: now,
         };
-        serverState = await saveVaultConfigOnServer(configDoc);
+        await saveVaultConfigToFirestore(configDoc);
       }
     }
 
-    // Automatically pair & approve current device for Admin with Hardware Profile
-    const existingDev = serverState.devices.find(
+    // Automatically pair & approve current device for Admin with Hardware Certificate
+    const existingDev = devices.find(
       (d) =>
         d.memberId === adminMember!.id &&
         d.deviceFingerprint === detectedDevice.deviceFingerprint
@@ -978,12 +698,13 @@ export default function App() {
         requestedAt: now,
         lastSeenAt: now,
       };
-      serverState = await saveDeviceOnServer(devId, newAdminDev);
+      await saveDeviceToFirestore(devId, newAdminDev);
     } else if (
       existingDev.status !== 'approved' ||
       !existingDev.hardwareSignatureHash
     ) {
-      serverState = await saveDeviceOnServer(existingDev.id, {
+      await saveDeviceToFirestore(existingDev.id, {
+        ...existingDev,
         status: 'approved',
         hardwareModelOs: detectedDevice.hardwareModelOs,
         hardwareDeviceType: detectedDevice.hardwareDeviceType,
@@ -991,8 +712,6 @@ export default function App() {
         lastSeenAt: now,
       });
     }
-
-    applyServerState(serverState);
 
     let mergedDeks: string[] = [];
     try {
@@ -1002,16 +721,13 @@ export default function App() {
       mergedDeks = [];
     }
 
-    await logActivityAndSync(
+    await logActivityInFirestore(
       adminMember.id,
       adminMember.fullName,
-      isFirstBootstrap ? 'VAULT_BOOTSTRAP' : 'ADMIN_GOOGLE_LOGIN',
+      isFirstBootstrap ? 'VAULT_BOOTSTRAP' : 'ADMIN_FIREBASE_AUTH_LOGIN',
       isFirstBootstrap
-        ? `Zainicjalizowano nowy skarbiec dla Pierwszego Administratora (${identity.email}) i zapisano plik na Google Drive.`
-        : restoredExistingVaultFromDrive
-          ? `Wykryto istniejący skarbiec na Google Drive (${identity.email}) — pobrano i odblokowano bazę.`
-          : `Główny Administrator zalogował się kontem Google (${identity.email}) i zsynchronizował Google Drive.`,
-      identity.accessToken
+        ? `Zainicjalizowano nowy skarbiec dla Pierwszego Administratora (${email}) w Cloud Firestore.`
+        : `Główny Administrator zalogował się przez Firebase Auth (${email}).`
     );
 
     setCurrentMemberId(adminMember.id);
@@ -1019,151 +735,26 @@ export default function App() {
     setActiveMergedDeks(mergedDeks);
     setIsVaultLockedByTimeout(false);
     showToast(
-      restoredExistingVaultFromDrive
-        ? `Wykryto istniejący skarbiec na Google Drive (${identity.email}) i przywrócono bazę!`
-        : isFirstBootstrap
-          ? `Utworzono nowy skarbiec dla ${identity.email} i zapisano na Google Drive!`
-          : `Zalogowano przez Google jako ${identity.email}!`
+      isFirstBootstrap
+        ? `Utworzono nowy skarbiec dla ${email} w Cloud Firestore!`
+        : `Zalogowano przez Firebase Auth jako ${email}!`
     );
   };
 
-  // Sync shared encrypted vault file from Admin's Google Drive when a Family Member opens a customized invitation link inside the installed PWA
-  const handleSyncSharedVaultFromAdminDrive = useCallback(
-    async (params: {
-      driveFileId?: string;
-      syncEncryptionKey?: string;
-      encryptedSnapshot?: string;
-      inviteToken?: string;
-      driveAccessToken?: string;
-      inviteMetadataPacket?: string;
-    }): Promise<boolean> => {
-      let baseState = await fetchVaultStateFromServer();
-      let pulledOk = false;
-
-      if (params.syncEncryptionKey) {
-        const pulled = await pullSharedVaultStateFromAdminDriveForMember({
-          driveFileId: params.driveFileId,
-          syncEncryptionKey: params.syncEncryptionKey,
-          encryptedSnapshot: params.encryptedSnapshot,
-          driveAccessToken: params.driveAccessToken,
-        });
-        if (
-          pulled &&
-          pulled.state &&
-          Array.isArray(pulled.state.members) &&
-          pulled.state.members.length > 0
-        ) {
-          baseState = pulled.state;
-          pulledOk = true;
-        }
-      }
-
-      // Ensure the invitation from `inviteMetadataPacket` (or `inviteToken`) is present in `baseState.invitations` so local verification and account creation always succeed
-      const decodedInvite = decodeInviteMetadataPacket(
-        params.inviteMetadataPacket
-      );
-      const nextInvitations = Array.isArray(baseState.invitations)
-        ? [...baseState.invitations]
-        : [];
-
-      if (decodedInvite) {
-        const existingIdx = nextInvitations.findIndex(
-          (i) => i.token === decodedInvite.token || i.id === decodedInvite.id
-        );
-        if (existingIdx >= 0) {
-          nextInvitations[existingIdx] = decodedInvite;
-        } else {
-          nextInvitations.unshift(decodedInvite);
-        }
-      } else if (params.inviteToken && params.inviteToken.startsWith('inv_')) {
-        const exists = nextInvitations.some(
-          (i) => i.token === params.inviteToken
-        );
-        if (!exists) {
-          nextInvitations.unshift({
-            id: `id_${params.inviteToken}`,
-            token: params.inviteToken,
-            purpose: 'new_member',
-            mode: 'single_use',
-            invitedLabel: 'Zaproszenie do Skarbca Rodzinnego',
-            createdByMemberId: 'admin',
-            createdByMemberName: 'Główny Administrator',
-            status: 'active',
-            usedCount: 0,
-            maxUses: 1,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(
-              Date.now() + 24 * 60 * 60 * 1000
-            ).toISOString(),
-          });
-        }
-      }
-
-      if (pulledOk || decodedInvite || params.inviteToken) {
-        const updatedState = await replaceVaultStateOnServer({
-          ...baseState,
-          invitations: nextInvitations,
-          driveSyncFileId:
-            params.driveFileId || baseState.driveSyncFileId || '',
-          syncEncryptionKey:
-            params.syncEncryptionKey || baseState.syncEncryptionKey || '',
-        });
-        applyServerState(updatedState);
-        return true;
-      }
-
-      return false;
-    },
-    [applyServerState]
-  );
-
-  // Reset local standalone state (e.g. clearing old `adm***@familystream.local` cache on phone)
-  const handleResetLocalVaultInstance = useCallback(async () => {
-    try {
-      window.localStorage.removeItem('fsv_standalone_state_v1');
-      window.localStorage.removeItem('fsv_standalone_vault_state_v1');
-      window.localStorage.removeItem('fsv_standalone_session_v1');
-      window.localStorage.removeItem('fsv_pwa_handoff_v1');
-      window.localStorage.removeItem(REMEMBERED_SESSION_KEY);
-      const emptyState = await replaceVaultStateOnServer({
-        vaultConfig: null,
-        members: [],
-        devices: [],
-        passwords: [],
-        invitations: [],
-        activityLogs: [],
-        driveSyncFileId: '',
-      });
-      applyServerState(emptyState);
-      const latestBoot = await fetchBootstrapStatusFromServer().catch(
-        () => null
-      );
-      if (latestBoot) setBootstrapStatus(latestBoot);
-      showToast(
-        'Wyczyszczono lokalny stan testowy! Kliknij teraz „Zaloguj przez Google”, aby wybrać swoje konto Google.'
-      );
-    } catch (err) {
-      console.warn('Reset local instance error:', err);
-    }
-  }, [applyServerState]);
-
   
-  // 2. LOGIN WITH INTERNAL CREDENTIALS (Family Members, Co-Admins & Admin)
+  // 2. LOGIN WITH INTERNAL CREDENTIALS + HARDWARE CERTIFICATE (Family Members, Co-Admins & Admin)
   const handleLoginWithCredentials = async (
     username: string,
     password: string
   ) => {
-    let serverState = await fetchVaultStateFromServer();
-    applyServerState(serverState);
-
-    const member = serverState.members.find(
+    const member = members.find(
       (m) =>
         m.username.toLowerCase() === username.toLowerCase() &&
         m.status !== 'merged'
     );
     if (!member) {
       throw new Error(
-        'Nie znaleziono konta o podanym loginie. Jeśli nie masz jeszcze konta, poproś Administratora lub Zaufanego Opiekuna o link zaproszeniowy.'
+        'Nie znaleziono konta o podanym loginie w Cloud Firestore. Jeśli nie masz jeszcze konta, poproś Administratora lub Zaufanego Opiekuna o link zaproszeniowy.'
       );
     }
 
@@ -1174,16 +765,6 @@ export default function App() {
       );
     }
 
-    const sessionRes = await establishVaultSessionOnServer({
-      mode: 'member_login',
-      memberId: member.id,
-      username: member.username,
-      passwordHash: computedHash,
-      deviceFingerprint: detectedDevice.deviceFingerprint,
-      deviceName: detectedDevice.deviceName,
-    });
-    serverState = sessionRes.state;
-
     let mergedDeks: string[] = [];
     try {
       const parsed = JSON.parse(member.mergedVaultKeysJson || '[]');
@@ -1193,7 +774,7 @@ export default function App() {
     }
 
     const existingDevice =
-      serverState.devices.find(
+      devices.find(
         (d) =>
           d.memberId === member.id &&
           d.deviceFingerprint === detectedDevice.deviceFingerprint
@@ -1202,7 +783,7 @@ export default function App() {
     if (
       member.role === 'admin' ||
       member.username.toLowerCase() === 'admin' ||
-      member.id === serverState.vaultConfig?.adminMemberId
+      member.id === vaultConfig?.adminMemberId
     ) {
       const dekBase64 = await unwrapDekWithPassword(
         member.wrappedMasterKey,
@@ -1232,9 +813,10 @@ export default function App() {
           requestedAt: now,
           lastSeenAt: now,
         };
-        serverState = await saveDeviceOnServer(devId, adminDev);
+        await saveDeviceToFirestore(devId, adminDev);
       } else if (existingDevice.status !== 'approved') {
-        serverState = await saveDeviceOnServer(existingDevice.id, {
+        await saveDeviceToFirestore(existingDevice.id, {
+          ...existingDevice,
           status: 'approved',
           hardwareModelOs: detectedDevice.hardwareModelOs,
           hardwareDeviceType: detectedDevice.hardwareDeviceType,
@@ -1243,7 +825,6 @@ export default function App() {
         });
       }
 
-      applyServerState(serverState);
       setCurrentMemberId(member.id);
       setActiveDekBase64(dekBase64);
       setActiveMergedDeks(mergedDeks);
@@ -1253,7 +834,7 @@ export default function App() {
     }
 
     // HARDCORE HARDWARE-BOUND CRYPTOGRAPHY FOR FAMILY MEMBERS & CO-ADMINS:
-    // Only an APPROVED device with a server-issued `deviceApprovalToken` can unlock private passwords!
+    // Only an APPROVED device with a Firestore-issued `deviceApprovalToken` can unlock private passwords!
     if (
       member.status === 'active' &&
       existingDevice &&
@@ -1277,7 +858,7 @@ export default function App() {
       let dekBase64: string;
       if (existingDevice.hardwareWrappedDek) {
         try {
-          // Derive Hardware-Bound AES-256-GCM key from Password + OS-Free Hardware Model + Device ID + Mode + Server Certificate Token
+          // Derive Hardware-Bound AES-256-GCM key from Password + OS-Free Hardware Model + Device ID + Mode + Certificate Token
           dekBase64 = await unwrapDekWithHardwareCertificate(
             existingDevice.hardwareWrappedDek,
             hwParams
@@ -1295,7 +876,8 @@ export default function App() {
               })
             : existingDevice.hardwareWrappedDek;
 
-          serverState = await saveDeviceOnServer(existingDevice.id, {
+          await saveDeviceToFirestore(existingDevice.id, {
+            ...existingDevice,
             lastSeenAt: now,
             clientMode: detectedDevice.clientMode,
             hardwareModelOs: detectedDevice.hardwareModelOs,
@@ -1305,7 +887,6 @@ export default function App() {
           });
         } catch {
           // Self-healing migration if OS version string changed before OS-free normalization:
-          // Verify password via wrappedMasterKey and re-seal with the OS-independent hardware model
           dekBase64 = await unwrapDekWithPassword(
             member.wrappedMasterKey,
             password,
@@ -1319,7 +900,8 @@ export default function App() {
               hardwareDeviceType: detectedDevice.hardwareDeviceType,
             }
           );
-          serverState = await saveDeviceOnServer(existingDevice.id, {
+          await saveDeviceToFirestore(existingDevice.id, {
+            ...existingDevice,
             lastSeenAt: now,
             clientMode: detectedDevice.clientMode,
             hardwareModelOs: detectedDevice.hardwareModelOs,
@@ -1330,7 +912,6 @@ export default function App() {
         }
       } else {
         // First login after Admin/Co-Admin approved this device or rebound its certificate:
-        // Unwrap master DEK and immediately seal it into a Hardware-Bound Envelope for this specific device
         dekBase64 = await unwrapDekWithPassword(
           member.wrappedMasterKey,
           password,
@@ -1344,7 +925,8 @@ export default function App() {
             hardwareDeviceType: detectedDevice.hardwareDeviceType,
           }
         );
-        serverState = await saveDeviceOnServer(existingDevice.id, {
+        await saveDeviceToFirestore(existingDevice.id, {
+          ...existingDevice,
           lastSeenAt: now,
           clientMode: detectedDevice.clientMode,
           hardwareModelOs: detectedDevice.hardwareModelOs,
@@ -1354,9 +936,7 @@ export default function App() {
         });
       }
 
-      applyServerState(serverState);
-
-      await logActivityAndSync(
+      await logActivityInFirestore(
         member.id,
         member.fullName,
         'MEMBER_LOGIN',
@@ -1404,8 +984,7 @@ export default function App() {
     password: string;
     setupBiometrics: boolean;
   }) => {
-    let serverState = await fetchVaultStateFromServer();
-    const duplicate = serverState.members.find(
+    const duplicate = members.find(
       (m) =>
         m.username.toLowerCase() === params.username.toLowerCase() &&
         m.status !== 'merged'
@@ -1428,47 +1007,7 @@ export default function App() {
     );
     const vaultEscrowKey = await wrapDekForMergeEscrow(dekBase64, salt);
 
-    // Ensure the invitation token is registered in local `serverState.invitations` so `establishVaultSessionOnServer` and `consumeInvitationTokenOnServer` always succeed even on static GitHub Pages
-    const hasInviteInStore = (serverState.invitations || []).some(
-      (i) => i.token === params.inviteToken
-    );
-    if (!hasInviteInStore) {
-      serverState = await replaceVaultStateOnServer({
-        ...serverState,
-        invitations: [
-          {
-            id: `id_${params.inviteToken}`,
-            token: params.inviteToken,
-            purpose: 'new_member',
-            mode: 'single_use',
-            invitedLabel: `Konto dla: ${params.fullName}`,
-            createdByMemberId: 'admin',
-            createdByMemberName: 'Główny Administrator',
-            status: 'active',
-            usedCount: 0,
-            maxUses: 1,
-            createdAt: now,
-            expiresAt: new Date(
-              Date.now() + 24 * 60 * 60 * 1000
-            ).toISOString(),
-          },
-          ...(serverState.invitations || []),
-        ],
-      });
-    }
-
-    // Verify & establish bootstrap session with the invitation token
-    await establishVaultSessionOnServer({
-      mode: 'member_register',
-      memberId,
-      username: params.username,
-      deviceFingerprint: detectedDevice.deviceFingerprint,
-      deviceName: detectedDevice.deviceName,
-      inviteToken: params.inviteToken,
-    });
-
-    // Consume invitation token on server
-    await consumeInvitationTokenOnServer(params.inviteToken);
+    await consumeInvitationTokenInFirestore(params.inviteToken);
 
     let credentialId = '';
     if (params.setupBiometrics) {
@@ -1526,20 +1065,15 @@ export default function App() {
       lastSeenAt: now,
     };
 
-    await saveMemberOnServer(memberId, newMember);
-    await saveDeviceOnServer(devId, newDevice);
+    await saveMemberToFirestore(memberId, newMember);
+    await saveDeviceToFirestore(devId, newDevice);
 
-    const updatedState = await logActivityAndSync(
+    await logActivityInFirestore(
       memberId,
       params.fullName,
       'MEMBER_INVITE_REGISTER',
       `Domownik ${params.fullName} (login: ${params.username}, sprzęt: ${detectedDevice.hardwareSignatureHash}) kliknął „Załóż mi konto” z linku zaproszeniowego i oczekuje na wydanie Certyfikatu Sprzętowego.`
     );
-
-    // Push the newly created pending member & pending device back to `FamilyStreamVault_AutoSync.vault.enc` on the Admin's Google Drive so the Admin sees the request in Tab 02!
-    const syncedToAdminDrive = await pushMemberRegistrationToSharedAdminDrive(
-      updatedState
-    ).catch(() => false);
 
     setPendingAuthState({
       member: newMember,
@@ -1548,13 +1082,11 @@ export default function App() {
       passwordPlain: params.password,
     });
     showToast(
-      syncedToAdminDrive
-        ? 'Wysłano zgłoszenie „Załóż mi konto” bezpośrednio do bazy Administratora na Google Drive! Poczekaj na zatwierdzenie.'
-        : 'Konto zostało utworzone z zaproszenia! Poczekaj na zatwierdzenie i wydanie Certyfikatu Sprzętowego przez Administratora lub Opiekuna.'
+      'Zgłoszenie „Załóż mi konto” zapisano w Cloud Firestore! Poczekaj na zatwierdzenie przez Administratora lub Opiekuna.'
     );
   };
 
-  // 3B. RECOVER EXISTING MEMBER ACCOUNT VIA RECOVERY LINK (np. dla Mamy od Brata lub Admina)
+  // 3B. RECOVER EXISTING MEMBER ACCOUNT VIA RECOVERY LINK
   const handleRecoverMemberAccountWithInvite = async (params: {
     inviteToken: string;
     targetMemberId: string;
@@ -1562,16 +1094,14 @@ export default function App() {
     newPassword: string;
     setupBiometrics: boolean;
   }) => {
-    let serverState = await fetchVaultStateFromServer();
-    const targetMember = serverState.members.find(
-      (m) => m.id === params.targetMemberId
-    );
+    const targetMember = members.find((m) => m.id === params.targetMemberId);
     if (!targetMember) {
-      throw new Error('Nie znaleziono konta domownika powiązanego z tym linkiem.');
+      throw new Error(
+        'Nie znaleziono konta domownika powiązanego z tym linkiem.'
+      );
     }
 
-    // Check username collision with other members
-    const duplicate = serverState.members.find(
+    const duplicate = members.find(
       (m) =>
         m.id !== targetMember.id &&
         m.username.toLowerCase() === params.newUsername.toLowerCase() &&
@@ -1581,47 +1111,7 @@ export default function App() {
       throw new Error('Ten login jest już zajęty przez innego domownika.');
     }
 
-    const hasInviteInStore = (serverState.invitations || []).some(
-      (i) => i.token === params.inviteToken
-    );
-    if (!hasInviteInStore) {
-      serverState = await replaceVaultStateOnServer({
-        ...serverState,
-        invitations: [
-          {
-            id: `id_${params.inviteToken}`,
-            token: params.inviteToken,
-            purpose: 'account_recovery',
-            mode: 'single_use',
-            invitedLabel: `Link ratunkowy dla: ${targetMember.fullName}`,
-            targetMemberId: targetMember.id,
-            targetMemberName: targetMember.fullName,
-            targetUsername: targetMember.username,
-            createdByMemberId: 'admin',
-            createdByMemberName: 'Główny Administrator',
-            status: 'active',
-            usedCount: 0,
-            maxUses: 1,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(
-              Date.now() + 24 * 60 * 60 * 1000
-            ).toISOString(),
-          },
-          ...(serverState.invitations || []),
-        ],
-      });
-    }
-
-    await establishVaultSessionOnServer({
-      mode: 'member_register',
-      memberId: targetMember.id,
-      username: params.newUsername,
-      deviceFingerprint: detectedDevice.deviceFingerprint,
-      deviceName: detectedDevice.deviceName,
-      inviteToken: params.inviteToken,
-    });
-
-    await consumeInvitationTokenOnServer(params.inviteToken);
+    await consumeInvitationTokenInFirestore(params.inviteToken);
 
     // Recover existing DEK from vaultEscrowKey so the member keeps all private entries!
     const dekBase64 = await unwrapDekFromMergeEscrow(
@@ -1648,7 +1138,7 @@ export default function App() {
       updatedAt: now,
     };
 
-    await saveMemberOnServer(targetMember.id, updatedMember);
+    await saveMemberToFirestore(targetMember.id, updatedMember);
 
     let mergedDeks: string[] = [];
     try {
@@ -1675,19 +1165,16 @@ export default function App() {
       }
     }
 
-    // Automatically approve current device and seal its Hardware-Bound Certificate Envelope since recovery link was issued by Admin/Co-Admin
-    const existingDev = serverState.devices.find(
+    const existingDev = devices.find(
       (d) =>
         d.memberId === targetMember.id &&
         d.deviceFingerprint === detectedDevice.deviceFingerprint
     );
 
-    let updatedAfterDev: ServerVaultState;
-    let targetDevId: string;
-
+    let savedDev: Device;
     if (existingDev) {
-      targetDevId = existingDev.id;
-      updatedAfterDev = await saveDeviceOnServer(existingDev.id, {
+      savedDev = await saveDeviceToFirestore(existingDev.id, {
+        ...existingDev,
         status: 'approved',
         username: params.newUsername,
         clientMode: detectedDevice.clientMode,
@@ -1699,8 +1186,8 @@ export default function App() {
         lastSeenAt: now,
       });
     } else {
-      targetDevId = makeId('dev');
-      updatedAfterDev = await saveDeviceOnServer(targetDevId, {
+      const targetDevId = makeId('dev');
+      savedDev = await saveDeviceToFirestore(targetDevId, {
         id: targetDevId,
         memberId: targetMember.id,
         memberName: targetMember.fullName,
@@ -1719,10 +1206,7 @@ export default function App() {
       });
     }
 
-    const approvedDevWithToken = updatedAfterDev.devices.find(
-      (d) => d.id === targetDevId
-    );
-    if (approvedDevWithToken && approvedDevWithToken.deviceApprovalToken) {
+    if (savedDev.deviceApprovalToken) {
       const sealedHwDek = await wrapDekWithHardwareCertificate(dekBase64, {
         password: params.newPassword,
         saltBase64: targetMember.pbkdf2Salt,
@@ -1730,31 +1214,19 @@ export default function App() {
         hardwareModelOs: detectedDevice.hardwareModelOs,
         hardwareDeviceType: detectedDevice.hardwareDeviceType,
         clientMode: detectedDevice.clientMode,
-        deviceApprovalToken: approvedDevWithToken.deviceApprovalToken,
+        deviceApprovalToken: savedDev.deviceApprovalToken,
       });
-      await saveDeviceOnServer(targetDevId, {
+      await saveDeviceToFirestore(savedDev.id, {
+        ...savedDev,
         hardwareWrappedDek: sealedHwDek,
       });
     }
 
-    await establishVaultSessionOnServer({
-      mode: 'member_login',
-      memberId: targetMember.id,
-      username: params.newUsername,
-      passwordHash: newPasswordHash,
-      deviceFingerprint: detectedDevice.deviceFingerprint,
-      deviceName: detectedDevice.deviceName,
-    });
-
-    const finalState = await logActivityAndSync(
+    await logActivityInFirestore(
       targetMember.id,
       targetMember.fullName,
       'MEMBER_ACCOUNT_RECOVERED',
       `Domownik ${targetMember.fullName} ustawił nowe hasło i odzyskał dostęp za pomocą linku ratunkowego.`
-    );
-
-    await pushMemberRegistrationToSharedAdminDrive(finalState).catch(
-      () => false
     );
 
     setCurrentMemberId(targetMember.id);
@@ -1779,7 +1251,8 @@ export default function App() {
     );
 
     if (existing) {
-      await saveDeviceOnServer(existing.id, {
+      await saveDeviceToFirestore(existing.id, {
+        ...existing,
         status: 'pending',
         customLabel: customLabel || existing.customLabel,
         clientMode: detectedDevice.clientMode,
@@ -1807,17 +1280,14 @@ export default function App() {
         requestedAt: now,
         lastSeenAt: now,
       };
-      await saveDeviceOnServer(devId, newDevice);
+      await saveDeviceToFirestore(devId, newDevice);
     }
 
-    const updatedState = await logActivityAndSync(
+    await logActivityInFirestore(
       member.id,
       member.fullName,
       'DEVICE_AUTH_REQUEST',
       `Wysłano prośbę o autoryzację i Certyfikat Sprzętowy dla: ${detectedDevice.deviceName} (${detectedDevice.hardwareSignatureHash}).`
-    );
-    await pushMemberRegistrationToSharedAdminDrive(updatedState).catch(
-      () => false
     );
     showToast('Wysłano prośbę o autoryzację i Certyfikat Sprzętowy urządzenia!');
   };
@@ -1840,14 +1310,15 @@ export default function App() {
     });
 
     if (myDevice) {
-      await saveDeviceOnServer(myDevice.id, {
+      await saveDeviceToFirestore(myDevice.id, {
+        ...myDevice,
         webAuthnCredentialId: credentialId,
         lastSeenAt: new Date().toISOString(),
       });
     }
 
     setBiometricProfile(getStoredBiometricProfile());
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'BIOMETRIC_PAIRED',
@@ -1860,23 +1331,13 @@ export default function App() {
 
   const handleUnlockWithBiometrics = async () => {
     const stored = await authenticateWithBiometrics();
-    const sessionRes = await establishVaultSessionOnServer({
-      mode: 'biometric',
-      memberId: stored.memberId,
-      username: stored.username,
-      deviceFingerprint: detectedDevice.deviceFingerprint,
-      deviceName: detectedDevice.deviceName,
-    });
-    const serverState = sessionRes.state;
-    applyServerState(serverState);
-
-    const member = serverState.members.find(
+    const member = members.find(
       (m) => m.id === stored.memberId && m.status === 'active'
     );
     if (!member) {
       throw new Error('Konto powiązane z odciskiem palca nie jest aktywne.');
     }
-    const dev = serverState.devices.find(
+    const dev = devices.find(
       (d) =>
         d.memberId === member.id &&
         d.deviceFingerprint === detectedDevice.deviceFingerprint &&
@@ -1892,7 +1353,7 @@ export default function App() {
     setActiveDekBase64(stored.dekBase64);
     setActiveMergedDeks(stored.mergedDeksBase64 || []);
     setIsVaultLockedByTimeout(false);
-    await logActivityAndSync(
+    await logActivityInFirestore(
       member.id,
       member.fullName,
       'BIOMETRIC_UNLOCK',
@@ -1900,7 +1361,7 @@ export default function App() {
     );
   };
 
-  // 6. PASSWORD CRUD & SUB-ACCOUNTS
+  // 6. PASSWORD CRUD & SUB-ACCOUNTS (E2E Encryption before setDoc in Firestore)
   const handleAddPassword = async (params: {
     section: 'shared' | 'private';
     categoryId: string;
@@ -1916,20 +1377,20 @@ export default function App() {
     const now = new Date().toISOString();
     const pwId = makeId('pw');
 
-    let record: PasswordRecord;
     if (params.section === 'private') {
+      const plainPrivatePayload: DecryptedPrivatePayload = {
+        categoryId: params.categoryId,
+        serviceName: params.serviceName,
+        serviceUrl: params.serviceUrl,
+        login: params.login,
+        password: params.password,
+      };
       const encryptedPayload = await encryptPrivateRecordPayload(
-        {
-          categoryId: params.categoryId,
-          serviceName: params.serviceName,
-          serviceUrl: params.serviceUrl,
-          login: params.login,
-          password: params.password,
-        },
+        plainPrivatePayload,
         activeDekBase64
       );
       const shouldReveal = Boolean(params.revealToAdmin);
-      record = {
+      const record: PasswordRecord = {
         id: pwId,
         section: 'private',
         categoryId: shouldReveal ? params.categoryId : 'ENC[PRIVATE]',
@@ -1950,13 +1411,14 @@ export default function App() {
         updatedAt: now,
         passwordUpdatedAt: now,
       };
+      await savePasswordToFirestore(pwId, record);
     } else {
       const subList = params.subAccounts || [];
       const subMemberIds = subList.map((s) => s.assignedMemberId);
       const mergedAllowed = Array.from(
         new Set([...params.allowedMemberIds, ...subMemberIds, currentMember.id])
       );
-      record = {
+      const record: PasswordRecord = {
         id: pwId,
         section: 'shared',
         categoryId: params.categoryId,
@@ -1975,10 +1437,10 @@ export default function App() {
         updatedAt: now,
         passwordUpdatedAt: now,
       };
+      await savePasswordToFirestore(pwId, record);
     }
 
-    await savePasswordOnServer(pwId, record);
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'PASSWORD_CREATED',
@@ -1988,11 +1450,7 @@ export default function App() {
           : 'Dodano nowy zaszyfrowany rekord prywatny (ENC[AES-256-GCM]).'
         : `Dodano wspólne konto: ${params.serviceName}.`
     );
-    showToast(
-      googleAccessToken
-        ? 'Dodano hasło na serwerze i zsynchronizowano z Google Drive!'
-        : 'Dodano nowe hasło do skarbca!'
-    );
+    showToast('Dodano nowe hasło i zsynchronizowano w Cloud Firestore!');
   };
 
   const handleUpdateSubAccounts = async (
@@ -2008,13 +1466,14 @@ export default function App() {
         )
       : record.allowedMemberIds;
 
-    await savePasswordOnServer(record.id, {
+    await savePasswordToFirestore(record.id, {
       subAccountsJson: JSON.stringify(nextSubAccounts),
       allowedMemberIds: nextAllowed,
       updatedAt: now,
       passwordUpdatedAt: now,
     });
-    await logActivityAndSync(
+
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'SUBACCOUNTS_UPDATED',
@@ -2042,7 +1501,7 @@ export default function App() {
         },
         activeDekBase64
       );
-      await savePasswordOnServer(record.id, {
+      await savePasswordToFirestore(record.id, {
         passwordValue: record.revealToAdmin
           ? newPassword
           : reEncrypted.slice(0, 96) + '...',
@@ -2051,14 +1510,14 @@ export default function App() {
         passwordUpdatedAt: now,
       });
     } else {
-      await savePasswordOnServer(record.id, {
+      await savePasswordToFirestore(record.id, {
         passwordValue: newPassword,
         updatedAt: now,
         passwordUpdatedAt: now,
       });
     }
 
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'PASSWORD_QUICK_UPDATE',
@@ -2081,7 +1540,7 @@ export default function App() {
     }
 
     const now = new Date().toISOString();
-    await savePasswordOnServer(record.id, {
+    await savePasswordToFirestore(record.id, {
       revealToAdmin: nextReveal,
       categoryId: nextReveal ? decrypted.categoryId : 'ENC[PRIVATE]',
       serviceName: nextReveal ? decrypted.serviceName : 'ENC[PRIVATE]',
@@ -2093,7 +1552,7 @@ export default function App() {
       updatedAt: now,
     });
 
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'PRIVATE_REVEAL_TOGGLED',
@@ -2114,11 +1573,11 @@ export default function App() {
   ) => {
     if (!currentMember) return;
     const now = new Date().toISOString();
-    await savePasswordOnServer(record.id, {
+    await savePasswordToFirestore(record.id, {
       allowedMemberIds: memberIds,
       updatedAt: now,
     });
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ACCESS_UPDATED',
@@ -2129,8 +1588,8 @@ export default function App() {
 
   const handleDeleteRecord = async (record: PasswordRecord) => {
     if (!currentMember) return;
-    await deletePasswordOnServer(record.id);
-    await logActivityAndSync(
+    await deletePasswordFromFirestore(record.id);
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'PASSWORD_DELETED',
@@ -2152,13 +1611,20 @@ export default function App() {
     if (!currentMember) {
       throw new Error('Brak aktywnej sesji.');
     }
-    const res = await createInvitationOnServer({
+    const targetMember = params.targetMemberId
+      ? members.find((m) => m.id === params.targetMemberId)
+      : undefined;
+
+    const invitation = await createInvitationInFirestore({
       ...params,
+      targetMemberId: targetMember?.id,
+      targetMemberName: targetMember?.fullName,
+      targetUsername: targetMember?.username,
       createdByMemberId: currentMember.id,
       createdByMemberName: currentMember.fullName,
     });
-    applyServerState(res.state);
-    await logActivityAndSync(
+
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'INVITE_CREATED',
@@ -2171,14 +1637,13 @@ export default function App() {
           }).`
     );
     showToast('Utworzono i skopiowano link do schowka!');
-    return res.invitation;
+    return invitation;
   };
 
   const handleDeleteInvitation = async (invitationId: string) => {
     if (!currentMember) return;
-    const nextState = await deleteInvitationOnServer(invitationId);
-    applyServerState(nextState);
-    await logActivityAndSync(
+    await deleteInvitationFromFirestore(invitationId);
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'INVITE_DELETED',
@@ -2212,7 +1677,8 @@ export default function App() {
     );
 
     const now = new Date().toISOString();
-    await saveMemberOnServer(target.id, {
+    await saveMemberToFirestore(target.id, {
+      ...target,
       username: params.newUsername,
       passwordHash: newPasswordHash,
       wrappedMasterKey: newWrappedMasterKey,
@@ -2222,16 +1688,16 @@ export default function App() {
 
     const targetDevs = devices.filter((d) => d.memberId === target.id);
     for (const dev of targetDevs) {
-      await saveDeviceOnServer(dev.id, {
+      await saveDeviceToFirestore(dev.id, {
+        ...dev,
         status: params.approveAllDevices ? 'approved' : dev.status,
         username: params.newUsername,
-        // Clear old hardwareWrappedDek so the device re-seals with the new password on next login
         hardwareWrappedDek: '',
         lastSeenAt: now,
       });
     }
 
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'MEMBER_CREDENTIALS_RESET',
@@ -2267,7 +1733,8 @@ export default function App() {
     );
 
     const now = new Date().toISOString();
-    await saveMemberOnServer(currentMember.id, {
+    await saveMemberToFirestore(currentMember.id, {
+      ...currentMember,
       passwordHash: newPasswordHash,
       wrappedMasterKey: newWrappedMasterKey,
       updatedAt: now,
@@ -2291,19 +1758,21 @@ export default function App() {
             hardwareDeviceType: detectedDevice.hardwareDeviceType,
           }
         );
-        await saveDeviceOnServer(dev.id, {
+        await saveDeviceToFirestore(dev.id, {
+          ...dev,
           hardwareWrappedDek: reSealedHardwareDek,
           lastSeenAt: now,
         });
       } else {
-        await saveDeviceOnServer(dev.id, {
+        await saveDeviceToFirestore(dev.id, {
+          ...dev,
           hardwareWrappedDek: '',
           lastSeenAt: now,
         });
       }
     }
 
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'OWN_PASSWORD_CHANGED',
@@ -2322,13 +1791,14 @@ export default function App() {
     if (!target) return;
 
     const now = new Date().toISOString();
-    await saveMemberOnServer(target.id, {
+    await saveMemberToFirestore(target.id, {
+      ...target,
       role: params.role,
       coAdminPermissions: params.coAdminPermissions,
       updatedAt: now,
     });
 
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'CO_ADMIN_UPDATED',
@@ -2349,18 +1819,20 @@ export default function App() {
     if (!target) return;
     const now = new Date().toISOString();
 
-    await saveMemberOnServer(memberId, {
+    await saveMemberToFirestore(memberId, {
+      ...target,
       status: 'active',
       updatedAt: now,
     });
     const memberDevs = devices.filter((d) => d.memberId === memberId);
     for (const dev of memberDevs) {
-      await saveDeviceOnServer(dev.id, {
+      await saveDeviceToFirestore(dev.id, {
+        ...dev,
         status: 'approved',
         lastSeenAt: now,
       });
     }
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ADMIN_APPROVE_MEMBER',
@@ -2372,8 +1844,8 @@ export default function App() {
   const handleRejectPendingMember = async (memberId: string) => {
     if (!currentMember) return;
     const target = members.find((m) => m.id === memberId);
-    await deleteMemberOnServer(memberId);
-    await logActivityAndSync(
+    await deleteMemberFromFirestore(memberId);
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ADMIN_REJECT_MEMBER',
@@ -2386,11 +1858,12 @@ export default function App() {
     if (!currentMember) return;
     const dev = devices.find((d) => d.id === deviceId);
     if (!dev) return;
-    await saveDeviceOnServer(deviceId, {
+    await saveDeviceToFirestore(deviceId, {
+      ...dev,
       status: 'approved',
       lastSeenAt: new Date().toISOString(),
     });
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ADMIN_APPROVE_DEVICE',
@@ -2405,20 +1878,18 @@ export default function App() {
     if (!currentMember) return;
     const dev = devices.find((d) => d.id === deviceId);
     if (!dev) return;
-    const updatedState = await rebindDeviceCertificateOnServer(deviceId);
-    applyServerState(updatedState);
-    const updatedDev = updatedState.devices.find((d) => d.id === deviceId);
-    await logActivityAndSync(
+    const updatedDev = await rebindDeviceCertificateInFirestore(deviceId);
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ADMIN_REBIND_DEVICE_CERT',
       `Przepięto / odnowiono Certyfikat Sprzętowy (${
-        updatedDev?.deviceCertificateFingerprint || 'CERT-HW'
+        updatedDev.deviceCertificateFingerprint || 'CERT-HW'
       }) dla urządzenia ${dev.deviceName} (${dev.memberName}).`
     );
     showToast(
       `Odnowiono Certyfikat Sprzętowy (${
-        updatedDev?.deviceCertificateFingerprint || 'CERT-HW'
+        updatedDev.deviceCertificateFingerprint || 'CERT-HW'
       }) dla ${dev.memberName}!`
     );
   };
@@ -2427,8 +1898,8 @@ export default function App() {
     if (!currentMember) return;
     const dev = devices.find((d) => d.id === deviceId);
     if (!dev) return;
-    await deleteDeviceOnServer(deviceId);
-    await logActivityAndSync(
+    await deleteDeviceFromFirestore(deviceId);
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ADMIN_REVOKE_DEVICE',
@@ -2462,8 +1933,8 @@ export default function App() {
       requestedAt: now,
       lastSeenAt: now,
     };
-    await saveDeviceOnServer(devId, newDevice);
-    await logActivityAndSync(
+    await saveDeviceToFirestore(devId, newDevice);
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ADMIN_MANUAL_DEVICE',
@@ -2497,31 +1968,32 @@ export default function App() {
       new Set([...existingTargetMergedKeys, sourceDek])
     );
 
-    await mergeMembersOnServer({
+    await mergeMembersInFirestore({
       sourceMemberId,
       targetMemberId,
       updatedMergedKeysJson: JSON.stringify(updatedMergedKeys),
+      passwords,
     });
 
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'ADMIN_MERGE_ACCOUNTS',
       `Scalono konto „${sourceMember.fullName} (${sourceMember.username})” do konta „${targetMember.fullName} (${targetMember.username})”.`
     );
-    showToast('Pomyślnie scalono konta użytkowników!');
+    showToast('Pomyślnie scalono konta użytkowników w Cloud Firestore!');
   };
 
-  // 8. ADMIN TAB 3 ACTIONS: Categories, Settings, 1-File Auto-Sync & .vault.enc Backups
+  // 8. ADMIN TAB 3 ACTIONS: Categories, Settings & Local .vault.enc Backups
   const handleUpdateCategories = async (newCategories: VaultCategory[]) => {
     if (!currentMember || !vaultConfig) return;
     const now = new Date().toISOString();
-    await saveVaultConfigOnServer({
+    await saveVaultConfigToFirestore({
       ...vaultConfig,
       categoriesJson: JSON.stringify(newCategories),
       updatedAt: now,
     });
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'CATEGORIES_UPDATED',
@@ -2537,14 +2009,14 @@ export default function App() {
   }) => {
     if (!currentMember || !vaultConfig) return;
     const now = new Date().toISOString();
-    await saveVaultConfigOnServer({
+    await saveVaultConfigToFirestore({
       ...vaultConfig,
       defaultTheme: params.defaultTheme,
       clipboardClearSeconds: params.clipboardClearSeconds,
       autoLockMinutes: params.autoLockMinutes,
       updatedAt: now,
     });
-    await logActivityAndSync(
+    await logActivityInFirestore(
       currentMember.id,
       currentMember.fullName,
       'SETTINGS_UPDATED',
@@ -2556,7 +2028,7 @@ export default function App() {
     passphrase: string
   ): Promise<string> => {
     const backupObject: BackupFileStructure = {
-      version: '1.0.0',
+      version: '2.0.0-FIRESTORE-E2E',
       exportedAt: new Date().toISOString(),
       exportedBy: currentMember?.fullName || 'Administrator',
       vaultConfig,
@@ -2568,83 +2040,6 @@ export default function App() {
     };
     const plainJson = JSON.stringify(backupObject);
     return encryptVaultBackupFile(plainJson, passphrase);
-  };
-
-  const handleConnectGoogleForDrive = async (): Promise<string> => {
-    const accessToken = await connectGoogleDriveOAuthDirect();
-    setGoogleAccessToken(accessToken);
-    const latestState = await fetchVaultStateFromServer();
-    await triggerAutoSyncToGoogleDrive(latestState, accessToken);
-    showToast('Połączono z Google Drive i zsynchronizowano plik Auto-Sync!');
-    return accessToken;
-  };
-
-  const handleManualPushAutoSyncToDrive = async () => {
-    let token = googleAccessToken;
-    if (!token) {
-      token = await handleConnectGoogleForDrive();
-    }
-    const latestState = await fetchVaultStateFromServer();
-    await triggerAutoSyncToGoogleDrive(latestState, token);
-    showToast(
-      'Zaktualizowano zaszyfrowany plik FamilyStreamVault_AutoSync.vault.enc (AES-256-GCM) na Google Drive!'
-    );
-  };
-
-  const handleManualPullAutoSyncFromDrive = async () => {
-    let token = googleAccessToken;
-    if (!token) {
-      token = await handleConnectGoogleForDrive();
-    }
-    const pulled = await pullVaultStateFromDriveAutoSync(
-      token,
-      syncEncryptionKey
-    );
-    if (!pulled || !pulled.state) {
-      showToast(
-        'Brak pliku FamilyStreamVault_AutoSync.vault.enc na Twoim Google Drive.'
-      );
-      return;
-    }
-    const updated = await replaceVaultStateOnServer({
-      ...pulled.state,
-      driveSyncFileId: pulled.fileId,
-    });
-    applyServerState(updated);
-    setLastDriveAutoSyncAt(new Date().toISOString());
-    showToast(
-      'Odszyfrowano i wczytano stan bazy z pliku FamilyStreamVault_AutoSync.vault.enc z Google Drive!'
-    );
-  };
-
-  const handleExportBackupToGoogleDrive = async (
-    passphrase: string,
-    existingFileId?: string
-  ) => {
-    let token = googleAccessToken;
-    if (!token) {
-      token = await handleConnectGoogleForDrive();
-    }
-    const encryptedContent = await buildEncryptedBackupString(passphrase);
-    const dateStamp = new Date().toISOString().slice(0, 10);
-    const fileName = `FamilyStreamVault_${dateStamp}.vault.enc`;
-
-    await uploadEncryptedVaultToDrive({
-      accessToken: token,
-      fileName,
-      encryptedContent,
-      existingFileId,
-    });
-
-    if (currentMember) {
-      await logActivityAndSync(
-        currentMember.id,
-        currentMember.fullName,
-        'BACKUP_DRIVE_EXPORT',
-        `Wyeksportowano zaszyfrowaną kopię bazy (${fileName}) na Google Drive.`,
-        token
-      );
-    }
   };
 
   const handleDownloadLocalBackupFile = async (passphrase: string) => {
@@ -2663,41 +2058,11 @@ export default function App() {
     URL.revokeObjectURL(url);
 
     if (currentMember) {
-      await logActivityAndSync(
+      await logActivityInFirestore(
         currentMember.id,
         currentMember.fullName,
         'BACKUP_LOCAL_EXPORT',
         'Pobrano zaszyfrowaną kopię .vault.enc na dysk lokalny.'
-      );
-    }
-  };
-
-  const applyRestoredBackupJson = async (decryptedJson: string) => {
-    const parsed = JSON.parse(decryptedJson) as BackupFileStructure;
-    if (
-      !parsed ||
-      !Array.isArray(parsed.members) ||
-      !Array.isArray(parsed.passwords)
-    ) {
-      throw new Error('Plik kopii zapasowej ma nieprawidłową strukturę.');
-    }
-
-    const updated = await replaceVaultStateOnServer({
-      vaultConfig: parsed.vaultConfig || vaultConfig,
-      members: parsed.members,
-      devices: parsed.devices || [],
-      passwords: parsed.passwords,
-      invitations: parsed.invitations || [],
-      activityLogs: parsed.activityLogs || [],
-    });
-    applyServerState(updated);
-
-    if (currentMember) {
-      await logActivityAndSync(
-        currentMember.id,
-        currentMember.fullName,
-        'BACKUP_RESTORED',
-        `Przywrócono skarbiec z pliku .vault.enc (${parsed.passwords.length} haseł, ${parsed.members.length} kont).`
       );
     }
   };
@@ -2707,23 +2072,32 @@ export default function App() {
     passphrase: string
   ) => {
     const decryptedJson = await decryptVaultBackupFile(fileContent, passphrase);
-    await applyRestoredBackupJson(decryptedJson);
-  };
-
-  const handleRestoreBackupFromDriveFileId = async (
-    fileId: string,
-    passphrase: string
-  ) => {
-    let token = googleAccessToken;
-    if (!token) {
-      token = await handleConnectGoogleForDrive();
+    const parsed = JSON.parse(decryptedJson) as BackupFileStructure;
+    if (
+      !parsed ||
+      !Array.isArray(parsed.members) ||
+      !Array.isArray(parsed.passwords)
+    ) {
+      throw new Error('Plik kopii zapasowej ma nieprawidłową strukturę.');
     }
-    const encryptedContent = await downloadVaultBackupFromDrive(token, fileId);
-    const decryptedJson = await decryptVaultBackupFile(
-      encryptedContent,
-      passphrase
-    );
-    await applyRestoredBackupJson(decryptedJson);
+
+    await replaceFullVaultStateInFirestore({
+      vaultConfig: parsed.vaultConfig || vaultConfig,
+      members: parsed.members,
+      devices: parsed.devices || [],
+      passwords: parsed.passwords,
+      invitations: parsed.invitations || [],
+      activityLogs: parsed.activityLogs || [],
+    });
+
+    if (currentMember) {
+      await logActivityInFirestore(
+        currentMember.id,
+        currentMember.fullName,
+        'BACKUP_RESTORED',
+        `Przywrócono skarbiec z pliku .vault.enc do Cloud Firestore (${parsed.passwords.length} haseł, ${parsed.members.length} kont).`
+      );
+    }
   };
 
   // Filtered & sorted passwords for current user's personal view
@@ -2793,7 +2167,7 @@ export default function App() {
             Wymagane aktywne połączenie z internetem
           </h1>
           <p className="text-xs text-[var(--vault-muted)]">
-            FamilyStream Vault działa w trybie <strong>Online-Only</strong> dla zachowania natychmiastowej synchronizacji haseł i autoryzacji urządzeń domowników. Połącz się z siecią Wi-Fi lub komórkową, aby odblokować skarbiec.
+            FamilyStream Vault działa w trybie <strong>Online-Only (Cloud Firestore)</strong> dla zachowania natychmiastowej synchronizacji haseł i autoryzacji urządzeń domowników. Połącz się z siecią Wi-Fi lub komórkową, aby odblokować skarbiec.
           </p>
         </div>
       </div>
@@ -2857,13 +2231,13 @@ export default function App() {
       ) || null
     : null;
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     try {
       localStorage.removeItem(REMEMBERED_SESSION_KEY);
-    } catch {
+          } catch {
       // ignore
     }
-    setVaultApiSessionContext({ sessionToken: null });
+    await signOut(auth).catch(() => {});
     setCurrentMemberId(null);
     setActiveDekBase64(null);
     setActiveMergedDeks([]);
@@ -2924,12 +2298,11 @@ export default function App() {
       <main className="flex-1 w-full max-w-6xl mx-auto px-6 py-8">
         {isInitialLoading ? (
           <div className="py-16 text-center text-sm text-[var(--vault-muted)]">
-            Weryfikacja połączenia z serwerem FamilyStream Vault...
+            Łączenie z bazą danych Cloud Firestore (onSnapshot)...
           </div>
         ) : !currentMember || isVaultLockedByTimeout ? (
           <AuthAndBootstrapView
             vaultConfig={vaultConfig}
-            bootstrapStatus={bootstrapStatus}
             membersCount={members.length}
             detectedDevice={detectedDevice}
             biometricProfile={biometricProfile}
@@ -2963,10 +2336,6 @@ export default function App() {
             onRequestDeviceAuthorization={handleRequestDeviceAuthorization}
             onUnlockWithBiometrics={handleUnlockWithBiometrics}
             onCancelPendingState={() => setPendingAuthState(null)}
-            onSyncSharedVaultFromAdminDrive={
-              handleSyncSharedVaultFromAdminDrive
-            }
-            onResetLocalVaultInstance={handleResetLocalVaultInstance}
                       />
         ) : (
           <div className="space-y-6">
@@ -3012,7 +2381,7 @@ export default function App() {
                   isInstalled || detectedDevice.clientMode === 'pwa'
                 }
                 onInstallPWA={handleInstallPWAOrGuide}
-                appVersion={bootstrapStatus?.appVersion || '2026.02-HW-CERT'}
+                appVersion="3.0.0-FIREBASE-E2E"
                 isUpdatingApp={isUpdatingApp}
                 onTriggerAppUpdate={handleTriggerAppUpdate}
                 onRegisterBiometrics={handleRegisterBiometricsForCurrentDevice}
@@ -3036,13 +2405,6 @@ export default function App() {
                 invitations={invitations}
                 activityLogs={activityLogs}
                 currentAdmin={currentMember}
-                driveSyncFileId={driveSyncFileId}
-                syncEncryptionKey={syncEncryptionKey}
-                googleOAuthClientId={
-                  bootstrapStatus?.googleOAuthClientId || getOAuthClientId()
-                }
-                googleAccessToken={googleAccessToken}
-                onRefreshFromGoogleDrive={handleManualPullAutoSyncFromDrive}
                 onCreateInvitation={handleCreateInvitation}
                 onDeleteInvitation={handleDeleteInvitation}
                 onApproveMemberAndDevices={handleApproveMemberAndDevices}
@@ -3060,7 +2422,7 @@ export default function App() {
                 onMergeMemberAccounts={handleMergeMemberAccounts}
               />
             ) : isOwnerAdmin && activeAdminTab === 'config' ? (
-              /* ADMIN TAB 3: Google Drive Auto-Sync, Kopia .vault.enc, Kategorie i Parametry Bezpieczeństwa */
+              /* ADMIN TAB 3: Cloud Firestore, Kopia .vault.enc, Kategorie i Parametry Bezpieczeństwa */
               <AdminTab3ConfigAndBackup
                 vaultConfig={
                   vaultConfig || {
@@ -3079,19 +2441,10 @@ export default function App() {
                 }
                 categories={categories}
                 currentTheme={theme}
-                googleAccessToken={googleAccessToken}
-                lastDriveAutoSyncAt={lastDriveAutoSyncAt}
                 onUpdateCategories={handleUpdateCategories}
                 onUpdateSystemSettings={handleUpdateSystemSettings}
-                onConnectGoogleForDrive={handleConnectGoogleForDrive}
-                onManualPushAutoSyncToDrive={handleManualPushAutoSyncToDrive}
-                onManualPullAutoSyncFromDrive={handleManualPullAutoSyncFromDrive}
-                onExportBackupToGoogleDrive={handleExportBackupToGoogleDrive}
                 onDownloadLocalBackupFile={handleDownloadLocalBackupFile}
                 onRestoreBackupFromFile={handleRestoreBackupFromFile}
-                onRestoreBackupFromDriveFileId={
-                  handleRestoreBackupFromDriveFileId
-                }
               />
                           ) : (
               /* CLEAN PASSWORD VAULT VIEW (Identical privacy rules for all users + Section 03 for revealed entries) */

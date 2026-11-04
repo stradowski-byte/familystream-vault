@@ -1,17 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Plus,
   Trash2,
-  CloudUpload,
   Download,
   Upload,
   Sliders,
   ShieldAlert,
   CheckCircle2,
-  RefreshCw,
-  KeyRound,
+  Database,
   Copy,
   Check,
+  ExternalLink,
 } from 'lucide-react';
 import {
   ThemeMode,
@@ -19,39 +18,24 @@ import {
   VaultConfig,
 } from '../types/vault';
 import {
-  DriveBackupFileItem,
-  getOAuthClientId,
-  listVaultBackupsOnDrive,
-  setConfiguredGoogleOAuthClientId,
-} from '../lib/googleOAuthAndDriveSync';
-import { saveGoogleOAuthClientIdOnServer } from '../lib/vaultApiClient';
+  FIREBASE_AUTH_DOMAIN,
+  FIREBASE_DATABASE_ID,
+  FIREBASE_PROJECT_ID,
+} from '../lib/firebase';
 
 interface AdminTab3ConfigAndBackupProps {
   vaultConfig: VaultConfig;
   categories: VaultCategory[];
   currentTheme: ThemeMode;
-  googleAccessToken: string | null;
-  lastDriveAutoSyncAt: string | null;
   onUpdateCategories: (newCategories: VaultCategory[]) => Promise<void>;
   onUpdateSystemSettings: (params: {
     defaultTheme: ThemeMode;
     clipboardClearSeconds: number;
     autoLockMinutes: number;
   }) => Promise<void>;
-  onConnectGoogleForDrive: () => Promise<string>;
-  onManualPushAutoSyncToDrive: () => Promise<void>;
-  onManualPullAutoSyncFromDrive: () => Promise<void>;
-  onExportBackupToGoogleDrive: (
-    passphrase: string,
-    existingFileId?: string
-  ) => Promise<void>;
   onDownloadLocalBackupFile: (passphrase: string) => Promise<void>;
   onRestoreBackupFromFile: (
     fileContent: string,
-    passphrase: string
-  ) => Promise<void>;
-  onRestoreBackupFromDriveFileId: (
-    fileId: string,
     passphrase: string
   ) => Promise<void>;
 }
@@ -62,17 +46,10 @@ export const AdminTab3ConfigAndBackup: React.FC<
   vaultConfig,
   categories,
   currentTheme,
-  googleAccessToken,
-  lastDriveAutoSyncAt,
   onUpdateCategories,
   onUpdateSystemSettings,
-  onConnectGoogleForDrive,
-  onManualPushAutoSyncToDrive,
-  onManualPullAutoSyncFromDrive,
-  onExportBackupToGoogleDrive,
   onDownloadLocalBackupFile,
   onRestoreBackupFromFile,
-  onRestoreBackupFromDriveFileId,
 }) => {
   // Categories state
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -92,68 +69,27 @@ export const AdminTab3ConfigAndBackup: React.FC<
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsSavedMsg, setSettingsSavedMsg] = useState<string | null>(null);
 
-  // Backup & Google Drive state
+  // Local Encrypted Backup (.vault.enc) state
   const [backupPassphrase, setBackupPassphrase] = useState('');
-  const [driveFiles, setDriveFiles] = useState<DriveBackupFileItem[]>([]);
-  const [isLoadingDriveFiles, setIsLoadingDriveFiles] = useState(false);
   const [isProcessingBackup, setIsProcessingBackup] = useState(false);
   const [backupStatusMsg, setBackupStatusMsg] = useState<string | null>(null);
   const [backupErrorMsg, setBackupErrorMsg] = useState<string | null>(null);
 
-  // Google OAuth Client ID state & instructions
-  const [oauthClientIdInput, setOauthClientIdInput] = useState<string>(
-    () => getOAuthClientId() || ''
-  );
-  const [oauthSavedBanner, setOauthSavedBanner] = useState<string | null>(null);
-  const [showOAuthGuide, setShowOAuthGuide] = useState<boolean>(false);
-  const [copiedOriginInTab, setCopiedOriginInTab] = useState<boolean>(false);
-  const currentOrigin =
-    typeof window !== 'undefined' ? window.location.origin : '';
+  // Authorized domain copy helper
+  const [copiedDomain, setCopiedDomain] = useState<string | null>(null);
+  const currentHostname =
+    typeof window !== 'undefined' ? window.location.hostname : '';
 
-  const handleSaveOAuthClientIdInTab = async () => {
-    const cleaned = oauthClientIdInput.trim();
-    setConfiguredGoogleOAuthClientId(cleaned);
-    await saveGoogleOAuthClientIdOnServer(cleaned).catch(() => {});
-    setOauthSavedBanner(
-      cleaned
-        ? 'Zapisano identyfikator Google OAuth Client ID! Zostanie on również dołączony do pliku vault-public-config.json podczas aktualizacji GitHub Pages.'
-        : 'Wyczyszczono identyfikator Google OAuth Client ID.'
-    );
-  };
-
-  const handleCopyOriginInTab = () => {
-    if (!currentOrigin) return;
-    navigator.clipboard.writeText(currentOrigin).catch(() => {});
-    setCopiedOriginInTab(true);
-    setTimeout(() => setCopiedOriginInTab(false), 2500);
-  };
-
-  // Restore confirmation modal state
   const [pendingRestorePayload, setPendingRestorePayload] = useState<{
     sourceLabel: string;
-    fileContent?: string;
-    driveFileId?: string;
+    fileContent: string;
   } | null>(null);
-  const [pendingOverwriteDriveFile, setPendingOverwriteDriveFile] =
-    useState<DriveBackupFileItem | null>(null);
 
-  const refreshDriveFiles = async (token: string) => {
-    setIsLoadingDriveFiles(true);
-    try {
-      const files = await listVaultBackupsOnDrive(token);
-      setDriveFiles(files);
-    } catch {
-      // ignore if token expired
-    } finally {
-      setIsLoadingDriveFiles(false);
-    }
+  const handleCopyDomain = (domainText: string) => {
+    navigator.clipboard.writeText(domainText).catch(() => {});
+    setCopiedDomain(domainText);
+    setTimeout(() => setCopiedDomain(null), 2500);
   };
-
-  useEffect(() => {
-    if (googleAccessToken) {
-      refreshDriveFiles(googleAccessToken);
-    }
-  }, [googleAccessToken]);
 
   const handleAddCategory = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -219,39 +155,11 @@ export const AdminTab3ConfigAndBackup: React.FC<
         clipboardClearSeconds: Number(clipboardSeconds),
         autoLockMinutes: Number(autoLockMinutes),
       });
-      setSettingsSavedMsg('Zapisano globalne czasy ochrony schowka i blokady sesji.');
+      setSettingsSavedMsg(
+        'Zapisano globalne czasy ochrony schowka i blokady sesji w Cloud Firestore.'
+      );
     } finally {
       setIsSavingSettings(false);
-    }
-  };
-
-  const handleExportDriveClick = async (existingFileId?: string) => {
-    setBackupErrorMsg(null);
-    setBackupStatusMsg(null);
-    if (backupPassphrase.length < 4) {
-      setBackupErrorMsg(
-        'Podaj hasło szyfrowania kopii zapasowej .vault.enc (min. 4 znaki).'
-      );
-      return;
-    }
-    setIsProcessingBackup(true);
-    try {
-      await onExportBackupToGoogleDrive(backupPassphrase, existingFileId);
-      setPendingOverwriteDriveFile(null);
-      setBackupStatusMsg(
-        'Zaszyfrowana kopia .vault.enc została zapisana na Twoim Google Drive!'
-      );
-      if (googleAccessToken) {
-        await refreshDriveFiles(googleAccessToken);
-      }
-    } catch (err) {
-      setBackupErrorMsg(
-        err instanceof Error
-          ? err.message
-          : 'Nie udało się zapisać kopii na Google Drive.'
-      );
-    } finally {
-      setIsProcessingBackup(false);
     }
   };
 
@@ -267,7 +175,9 @@ export const AdminTab3ConfigAndBackup: React.FC<
     setIsProcessingBackup(true);
     try {
       await onDownloadLocalBackupFile(backupPassphrase);
-      setBackupStatusMsg('Pobrano zaszyfrowany plik .vault.enc na dysk lokalny.');
+      setBackupStatusMsg(
+        'Pobrano zaszyfrowany plik .vault.enc (AES-256-GCM) na dysk lokalny.'
+      );
     } catch (err) {
       setBackupErrorMsg(
         err instanceof Error ? err.message : 'Błąd pobierania kopii.'
@@ -296,25 +206,18 @@ export const AdminTab3ConfigAndBackup: React.FC<
     setBackupStatusMsg(null);
     if (backupPassphrase.length < 4) {
       setBackupErrorMsg(
-        'Podaj hasło, którym zaszyfrowano plik .vault.enc przed przywróceniem bazy.'
+        'Podaj hasło, którym zaszyfrowano plik .vault.enc przed przywróceniem bazy do Firestore.'
       );
       return;
     }
     setIsProcessingBackup(true);
     try {
-      if (pendingRestorePayload.fileContent) {
-        await onRestoreBackupFromFile(
-          pendingRestorePayload.fileContent,
-          backupPassphrase
-        );
-      } else if (pendingRestorePayload.driveFileId) {
-        await onRestoreBackupFromDriveFileId(
-          pendingRestorePayload.driveFileId,
-          backupPassphrase
-        );
-      }
+      await onRestoreBackupFromFile(
+        pendingRestorePayload.fileContent,
+        backupPassphrase
+      );
       setBackupStatusMsg(
-        `Pomyślnie przywrócono bazę danych z ${pendingRestorePayload.sourceLabel}!`
+        `Pomyślnie przywrócono bazę danych z ${pendingRestorePayload.sourceLabel} do Cloud Firestore!`
       );
       setPendingRestorePayload(null);
     } catch (err) {
@@ -330,201 +233,105 @@ export const AdminTab3ConfigAndBackup: React.FC<
 
   return (
     <div className="space-y-8">
-      {/* SECTION 01 (HIGHEST PRIORITY): Automatic 1-File Google Drive Sync & Encrypted Backup (.vault.enc) */}
+      {/* SECTION 01: Cloud Firestore Real-Time Status, Authorized Domains & Local E2E Backup (.vault.enc) */}
       <section className="p-6 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-5">
         <div className="space-y-1">
-          <h2 className="text-lg font-bold font-display text-[var(--vault-text)]">
-            01. Automatyczna Synchronizacja z Google Drive i Kopie Zapasowe (.vault.enc)
+          <h2 className="text-lg font-bold font-display text-[var(--vault-text)] flex items-center gap-2">
+            <Database className="w-5 h-5 text-[var(--vault-accent)]" />
+            <span>
+              01. Baza Cloud Firestore (Czas Rzeczywisty onSnapshot) i Szyfrowane Kopie Zapasowe (.vault.enc)
+            </span>
           </h2>
           <p className="text-xs text-[var(--vault-muted)]">
-            Każda zmiana w skarbcu zapisuje się na serwerze aplikacji i automatycznie aktualizuje jeden stały, w pełni zaszyfrowany plik <code className="font-mono">FamilyStreamVault_AutoSync.vault.enc</code> (AES-256-GCM) na Twoim Google Drive.
+            Skarbiec działa na bazie <strong>Firebase Cloud Firestore</strong> z nasłuchiwaniem w czasie rzeczywistym (<code className="font-mono">onSnapshot</code>) oraz natywnym podtrzymywaniem sesji przeglądarki (<code className="font-mono">browserLocalPersistence</code>). Wszystkie prywatne hasła są szyfrowane i deszyfrowane wyłącznie po stronie klienta (E2E AES-256-GCM + Certyfikat Sprzętowy).
           </p>
         </div>
 
-        {/* Live 1-File Google Drive Auto-Sync Status & Controls */}
-        <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-          <div className="space-y-1">
-            <div className="font-semibold text-[var(--vault-text)]">
-              Status Auto-Sync (Plik: <code className="font-mono">FamilyStreamVault_AutoSync.vault.enc</code> · AES-256-GCM):{' '}
-              <span className={googleAccessToken ? 'text-[var(--vault-success)]' : 'text-[var(--vault-warning)]'}>
-                {googleAccessToken ? 'Połączono z Google Drive (Szyfrowany Auto-Sync Aktywny)' : 'Wymaga połączenia z Google Drive'}
-              </span>
+        {/* Live Cloud Firestore Connection Info & Authorized Domains Helper */}
+        <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-3 text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="space-y-0.5">
+              <div className="font-semibold text-[var(--vault-text)]">
+                Połączony projekt Firebase:{' '}
+                <span className="font-mono text-[var(--vault-accent)]">
+                  {FIREBASE_PROJECT_ID}
+                </span>
+              </div>
+              <div className="text-[11px] font-mono text-[var(--vault-muted)]">
+                Baza Firestore: {FIREBASE_DATABASE_ID} · Auth Domain: {FIREBASE_AUTH_DOMAIN}
+              </div>
             </div>
-            <div className="text-[var(--vault-muted)]">
-              {lastDriveAutoSyncAt
-                ? `Ostatnia synchronizacja z Google Drive: ${new Date(lastDriveAutoSyncAt).toLocaleString('pl-PL')}`
-                : 'Po podłączeniu konta Google każde dodanie lub edycja hasła automatycznie szyfruje (AES-256-GCM) i nadpisuje stały plik na Twoim Google Drive.'}
-            </div>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-[var(--vault-success)] text-[var(--vault-success)] font-semibold">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Synchronizacja onSnapshot Aktywna</span>
+            </span>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            {!googleAccessToken ? (
+          <div className="pt-3 border-t border-[var(--vault-border)] space-y-2">
+            <div className="font-semibold text-[var(--vault-text)]">
+              Autoryzacja domeny GitHub Pages w Firebase Auth (jednorazowa konfiguracja dla logowania Google na telefonie):
+            </div>
+            <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
+              Aby natywne logowanie Google (<code className="font-mono">Firebase Auth</code>) działało w aplikacji PWA zainstalowanej z GitHub Pages, upewnij się, że domena <code className="font-mono text-[var(--vault-text)]">stradowski-byte.github.io</code> jest dopisana w konsoli Firebase w zakładce <strong>Authentication → Settings → Authorized domains</strong>:
+            </p>
+            <div className="flex flex-wrap items-center gap-2 pt-1">
               <button
                 type="button"
-                onClick={() => onConnectGoogleForDrive()}
-                className="px-3.5 py-2 font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
+                onClick={() => handleCopyDomain('stradowski-byte.github.io')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
               >
-                Połącz Google Drive Auto-Sync
+                {copiedDomain === 'stradowski-byte.github.io' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Skopiowano: stradowski-byte.github.io</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Kopiuj domenę: stradowski-byte.github.io</span>
+                  </>
+                )}
               </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  disabled={isProcessingBackup}
-                  onClick={onManualPushAutoSyncToDrive}
-                  className="px-3 py-1.5 font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
-                >
-                  Wyślij stan na Google Drive teraz
-                </button>
-                <button
-                  type="button"
-                  disabled={isProcessingBackup}
-                  onClick={onManualPullAutoSyncFromDrive}
-                  className="px-3 py-1.5 font-medium text-[var(--vault-text)] border border-[var(--vault-border)] hover:bg-[var(--vault-surface)] rounded-lg cursor-pointer"
-                >
-                  Pobierz stan z pliku Auto-Sync
-                </button>
-              </>
-            )}
-          </div>
-        </div>
 
-        {/* Google OAuth Client ID Setup & Step-by-Step Guide */}
-        <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-3 text-xs">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 font-semibold text-[var(--vault-text)]">
-              <KeyRound className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
-              <span>
-                Publiczny identyfikator Google OAuth Client ID (do okna wyboru konta Google i Google Drive)
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setShowOAuthGuide((v) => !v)}
-              className="text-[var(--vault-accent)] hover:underline font-medium cursor-pointer"
-            >
-              {showOAuthGuide
-                ? 'Ukryj instrukcję krok po kroku'
-                : 'Skąd wyciągnąć Client ID w ustawieniach Google? (Instrukcja)'}
-            </button>
-          </div>
-
-          <div className="flex flex-col sm:flex-row gap-2">
-            <input
-              type="text"
-              value={oauthClientIdInput}
-              onChange={(e) => setOauthClientIdInput(e.target.value)}
-              placeholder="np. 1234567890-abcdefg.apps.googleusercontent.com"
-              className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)] min-w-0"
-            />
-            <button
-              type="button"
-              onClick={handleSaveOAuthClientIdInTab}
-              className="px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer shrink-0"
-            >
-              Zapisz Client ID
-            </button>
-          </div>
-
-          {oauthSavedBanner && (
-            <div className="text-[11px] font-medium text-[var(--vault-success)]">
-              {oauthSavedBanner}
-            </div>
-          )}
-
-          {showOAuthGuide && (
-            <div className="p-3.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-3 text-[11px] text-[var(--vault-muted)]">
-              <div className="font-bold text-[var(--vault-text)]">
-                Jak samodzielnie wygenerować swój Google OAuth Client ID (4 kroki):
-              </div>
-              <ol className="list-decimal list-inside space-y-2 leading-relaxed">
-                <li>
-                  Wejdź na{' '}
-                  <a
-                    href="https://console.cloud.google.com/projectcreate"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono"
-                  >
-                    console.cloud.google.com/projectcreate
-                  </a>{' '}
-                  i utwórz projekt (np. <code>FamilyStream Vault</code>).
-                </li>
-                <li>
-                  Włącz obsługę Dysku Google pod adresem{' '}
-                  <a
-                    href="https://console.cloud.google.com/apis/library/drive.googleapis.com"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono"
-                  >
-                    console.cloud.google.com/apis/library/drive.googleapis.com
-                  </a>{' '}
-                  (kliknij <strong>Enable</strong>).
-                </li>
-                <li>
-                  Dodaj swój adres Gmail jako testera (naprawia <strong>Błąd 403: access_denied</strong>): wejdź na{' '}
-                  <a
-                    href="https://console.cloud.google.com/auth/audience"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono"
-                  >
-                    console.cloud.google.com/auth/audience
-                  </a>{' '}
-                  (zakładka <strong>Audience / Odbiorcy</strong>), w sekcji <strong>Test users</strong> kliknij <strong>+ Add users</strong>, wpisz swój adres Gmail (np. <code>stradowski@gmail.com</code>) i zapisz — lub kliknij wyżej <strong>Publish App</strong>.
-                </li>
-                <li>
-                  Utwórz identyfikator na{' '}
-                  <a
-                    href="https://console.cloud.google.com/apis/credentials/oauthclient"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono"
-                  >
-                    console.cloud.google.com/apis/credentials/oauthclient
-                  </a>{' '}
-                  — wybierz <strong>Web application</strong>, a w polu <strong>Authorized JavaScript origins</strong> dodaj adres domeny głównej (np. <code>https://stradowski-byte.github.io</code> — bez ukośnika i bez podfolderu na końcu!):
-                </li>
-              </ol>
-
-              {currentOrigin && (
-                <div className="p-2.5 rounded-lg border border-[var(--vault-accent)] bg-[var(--vault-bg)] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[10px] text-[var(--vault-muted)]">
-                      Bieżący adres Origin (dodaj też docelową domenę GitHub Pages, np. https://stradowski-byte.github.io):
-                    </div>
-                    <div className="text-xs font-mono font-bold text-[var(--vault-accent)] break-all">
-                      {currentOrigin}
-                    </div>
-                  </div>
+              {currentHostname &&
+                currentHostname !== 'stradowski-byte.github.io' && (
                   <button
                     type="button"
-                    onClick={handleCopyOriginInTab}
-                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-md cursor-pointer shrink-0"
+                    onClick={() => handleCopyDomain(currentHostname)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg cursor-pointer"
                   >
-                    {copiedOriginInTab ? (
+                    {copiedDomain === currentHostname ? (
                       <>
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Skopiowano</span>
+                        <Check className="w-3.5 h-3.5 text-[var(--vault-success)]" />
+                        <span>Skopiowano bieżący host</span>
                       </>
                     ) : (
                       <>
-                        <Copy className="w-3.5 h-3.5" />
-                        <span>Kopiuj Origin</span>
+                        <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                        <span>Kopiuj bieżący host ({currentHostname})</span>
                       </>
                     )}
                   </button>
-                </div>
-              )}
+                )}
+
+              <a
+                href={`https://console.firebase.google.com/project/${FIREBASE_PROJECT_ID}/authentication/settings`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-accent)] border border-[var(--vault-accent)] rounded-lg hover:bg-[var(--vault-surface)]"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Otwórz Firebase Authorized Domains</span>
+              </a>
             </div>
-          )}
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+        {/* Local Encrypted Backup (.vault.enc) Export / Import */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end pt-2">
           <div>
             <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
-              Hasło główne archiwum kopii zapasowej (.vault.enc)
+              Hasło główne archiwum lokalnej kopii zapasowej (.vault.enc · AES-256-GCM)
             </label>
             <input
               type="password"
@@ -539,26 +346,16 @@ export const AdminTab3ConfigAndBackup: React.FC<
             <button
               type="button"
               disabled={isProcessingBackup}
-              onClick={() => handleExportDriveClick()}
+              onClick={handleLocalExportClick}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer text-left leading-snug"
             >
-              <CloudUpload className="w-4 h-4 shrink-0" />
-              <span>Eksportuj .vault.enc na Google Drive</span>
-            </button>
-
-            <button
-              type="button"
-              disabled={isProcessingBackup}
-              onClick={handleLocalExportClick}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer text-left leading-snug"
-            >
               <Download className="w-4 h-4 shrink-0" />
-              <span>Pobierz .vault.enc lokalnie</span>
+              <span>Pobierz kopię .vault.enc lokalnie</span>
             </button>
 
             <label className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer text-left leading-snug">
               <Upload className="w-4 h-4 shrink-0" />
-              <span>Wczytaj z pliku .vault.enc</span>
+              <span>Wczytaj i przywróć z pliku .vault.enc</span>
               <input
                 type="file"
                 accept=".enc,.json,.txt"
@@ -568,121 +365,6 @@ export const AdminTab3ConfigAndBackup: React.FC<
             </label>
           </div>
         </div>
-
-        {/* Google Drive Files List */}
-        <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-semibold text-[var(--vault-text)]">
-              Pliki kopii .vault.enc na Twoim Google Drive:
-            </span>
-            {googleAccessToken ? (
-              <button
-                type="button"
-                onClick={() => refreshDriveFiles(googleAccessToken)}
-                className="inline-flex items-center gap-1 text-xs text-[var(--vault-accent)] hover:underline cursor-pointer"
-              >
-                <RefreshCw className="w-3 h-3" />
-                <span>Odśwież listę z Google Drive</span>
-              </button>
-            ) : (
-              <button
-                type="button"
-                onClick={async () => {
-                  const token = await onConnectGoogleForDrive();
-                  if (token) await refreshDriveFiles(token);
-                }}
-                className="text-xs font-medium text-[var(--vault-accent)] hover:underline cursor-pointer"
-              >
-                Połącz z Google Drive, aby wyświetlić kopie
-              </button>
-            )}
-          </div>
-
-          {isLoadingDriveFiles ? (
-            <div className="text-xs text-[var(--vault-muted)]">
-              Pobieranie listy kopii z Google Drive...
-            </div>
-          ) : driveFiles.length === 0 ? (
-            <div className="text-xs text-[var(--vault-muted)]">
-              {googleAccessToken
-                ? 'Brak zapisanych plików .vault.enc na Google Drive.'
-                : 'Kliknij „Eksportuj .vault.enc na Google Drive” lub połącz konto Google powyżej.'}
-            </div>
-          ) : (
-            <div className="space-y-2">
-              {driveFiles.map((df) => (
-                <div
-                  key={df.id}
-                  className="p-2.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
-                >
-                  <div>
-                    <span className="font-mono font-medium text-[var(--vault-text)]">
-                      {df.name}
-                    </span>
-                    <span className="text-[var(--vault-muted)] ml-2 tabular-nums">
-                      · Zmodyfikowano:{' '}
-                      {new Date(df.modifiedTime).toLocaleString('pl-PL')}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setPendingOverwriteDriveFile(df)}
-                      className="px-2.5 py-1 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded hover:bg-[var(--vault-surface-hover)] cursor-pointer"
-                    >
-                      Nadpisz tę kopię
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPendingRestorePayload({
-                          sourceLabel: `pliku Google Drive „${df.name}”`,
-                          driveFileId: df.id,
-                        })
-                      }
-                      className="px-2.5 py-1 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded cursor-pointer"
-                    >
-                      Przywróć z tej kopii
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* Confirmation Dialog for Overwriting Existing Drive Backup File */}
-        {pendingOverwriteDriveFile && (
-          <div className="p-4 rounded-xl border border-[var(--vault-warning)] bg-[var(--vault-bg)] space-y-2.5 text-xs">
-            <div className="flex items-center gap-2 font-semibold text-[var(--vault-text)]">
-              <ShieldAlert className="w-4 h-4 text-[var(--vault-warning)]" />
-              <span>
-                Czy na pewno chcesz zaktualizować zawartość pliku „{pendingOverwriteDriveFile.name}” na Google Drive?
-              </span>
-            </div>
-            <p className="text-[var(--vault-muted)]">
-              Operacja zastąpi istniejący plik kopii zapasowej na Google Drive najnowszym zaszyfrowanym zrzutem skarbca.
-            </p>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() =>
-                  handleExportDriveClick(pendingOverwriteDriveFile.id)
-                }
-                className="px-3.5 py-1.5 font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer"
-              >
-                Potwierdź aktualizację pliku na Google Drive
-              </button>
-              <button
-                type="button"
-                onClick={() => setPendingOverwriteDriveFile(null)}
-                className="px-3 py-1.5 text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer"
-              >
-                Anuluj
-              </button>
-            </div>
-          </div>
-        )}
 
         {/* Confirmation Dialog for Restoring Vault from .vault.enc */}
         {pendingRestorePayload && (
@@ -694,7 +376,7 @@ export const AdminTab3ConfigAndBackup: React.FC<
               </span>
             </div>
             <p className="text-[var(--vault-muted)]">
-              Przywrócenie kopii zapasowej odtworzy konta domowników, urządzenia oraz wpisy haseł wspólnych i prywatnych z wybranego pliku <code className="font-mono">.vault.enc</code>. Upewnij się, że powyżej wpisałeś poprawne hasło archiwum.
+              Przywrócenie kopii zapasowej odtworzy konta domowników, urządzenia oraz wpisy haseł wspólnych i prywatnych z wybranego pliku <code className="font-mono">.vault.enc</code> bezpośrednio do bazy Cloud Firestore. Upewnij się, że powyżej wpisałeś poprawne hasło archiwum.
             </p>
             <div className="flex items-center gap-2">
               <button
@@ -704,7 +386,7 @@ export const AdminTab3ConfigAndBackup: React.FC<
                 className="px-4 py-1.5 font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer"
               >
                 {isProcessingBackup
-                  ? 'Przywracanie bazy...'
+                  ? 'Przywracanie bazy do Firestore...'
                   : 'Potwierdzam — przywróć skarbiec'}
               </button>
               <button
@@ -827,7 +509,9 @@ export const AdminTab3ConfigAndBackup: React.FC<
         <div className="space-y-1">
           <h2 className="text-lg font-bold font-display text-[var(--vault-text)] flex items-center gap-2">
             <Sliders className="w-5 h-5 text-[var(--vault-accent)]" />
-            <span>03. Globalne Parametry Bezpieczeństwa Skarbca (Schowek i Auto-Lock)</span>
+            <span>
+              03. Globalne Parametry Bezpieczeństwa Skarbca (Schowek i Auto-Lock)
+            </span>
           </h2>
           <p className="text-xs text-[var(--vault-muted)]">
             Skonfiguruj czas automatycznego czyszczenia schowka po skopiowaniu hasła oraz czas automatycznej blokady skarbca po bezczynności. (Osobisty motyw kolorystyczny przełączysz w zakładce Profil).

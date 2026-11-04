@@ -41,18 +41,6 @@ export interface VaultInvitation {
   lastUsedAt?: string;
 }
 
-export interface VaultBootstrapStatus {
-  initialized: boolean;
-  vaultInstanceId: string;
-  adminEmailHint: string | null;
-  driveSyncConfigured: boolean;
-  driveSyncFileName: string;
-  driveSyncUpdatedAt: string | null;
-  googleOAuthClientId?: string;
-  appVersion: string;
-  updatedAt: string;
-}
-
 export interface GitHubSyncConfig {
   repoOwner: string;
   repoName: string;

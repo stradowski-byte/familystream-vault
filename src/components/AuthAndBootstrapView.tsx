@@ -18,12 +18,17 @@ import {
   Copy,
   Check,
   Cloud,
-  RotateCcw,
 } from 'lucide-react';
+import {
+  onAuthStateChanged,
+  signInWithPopup,
+  User as FirebaseUser,
+} from 'firebase/auth';
+import { auth, googleProvider } from '../lib/firebase';
+import { verifyInvitationTokenInFirestore } from '../lib/firestoreVaultService';
 import {
   Device,
   Member,
-  VaultBootstrapStatus,
   VaultConfig,
   VaultInvitation,
 } from '../types/vault';
@@ -31,27 +36,9 @@ import {
   DetectedDeviceProfile,
   StoredBiometricProfile,
 } from '../lib/deviceAndBiometrics';
-import {
-  saveGoogleOAuthClientIdOnServer,
-  verifyInvitationTokenOnServer,
-} from '../lib/vaultApiClient';
-import {
-  clearSavedAdminGoogleAccount,
-  decodeInviteMetadataPacket,
-  getOAuthClientId,
-  getSavedAdminGoogleAccount,
-  loadPublicRuntimeOAuthConfig,
-  loadPwaHandoffParameters,
-  parseCustomInviteUrlParameters,
-  PwaHandoffPayload,
-  savePwaHandoffParameters,
-  setConfiguredGoogleOAuthClientId,
-  syncSavedAdminFromVaultState,
-} from '../lib/googleOAuthAndDriveSync';
 
 interface AuthAndBootstrapViewProps {
   vaultConfig: VaultConfig | null;
-  bootstrapStatus: VaultBootstrapStatus | null;
   membersCount: number;
   detectedDevice: DetectedDeviceProfile;
   biometricProfile: StoredBiometricProfile | null;
@@ -66,12 +53,9 @@ interface AuthAndBootstrapViewProps {
   onInstallPWA: () => void;
   onTriggerAppUpdate: () => Promise<void>;
   isUpdatingApp: boolean;
-  onAdminGoogleLogin: (options?: {
-    email?: string;
-    displayName?: string;
+  onAdminGoogleLogin: (options: {
+    firebaseUser: FirebaseUser;
     masterPassword?: string;
-    skipOAuthPopup?: boolean;
-    forceAccountChooser?: boolean;
   }) => Promise<void>;
   onLoginWithCredentials: (username: string, password: string) => Promise<void>;
   onRegisterMemberAccountWithInvite: (params: {
@@ -91,22 +75,14 @@ interface AuthAndBootstrapViewProps {
   onRequestDeviceAuthorization: (customLabel: string) => Promise<void>;
   onUnlockWithBiometrics: () => Promise<void>;
   onCancelPendingState: () => void;
-  onSyncSharedVaultFromAdminDrive?: (params: {
-    driveFileId?: string;
-    syncEncryptionKey?: string;
-    encryptedSnapshot?: string;
-    inviteToken?: string;
-    driveAccessToken?: string;
-    inviteMetadataPacket?: string;
-  }) => Promise<boolean>;
-  onResetLocalVaultInstance?: () => Promise<void>;
   }
+
+const PWA_INVITE_HANDOFF_CACHE = 'fsv-pwa-handoff-cache-v1';
+const PWA_INVITE_HANDOFF_KEY = 'fsv_invite_token_v1';
 
 function extractInviteTokenFromInput(raw: string): string {
   const trimmed = raw.trim();
   if (!trimmed) return '';
-  const parsed = parseCustomInviteUrlParameters(trimmed);
-  if (parsed.inviteToken) return parsed.inviteToken;
   try {
     if (trimmed.includes('invite=')) {
       const url = new URL(
@@ -123,9 +99,68 @@ function extractInviteTokenFromInput(raw: string): string {
   return trimmed;
 }
 
+async function saveInviteTokenForPwaHandoff(token: string): Promise<void> {
+  if (!token) return;
+  try {
+    localStorage.setItem(PWA_INVITE_HANDOFF_KEY, token);
+  } catch {
+    // ignore
+  }
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(PWA_INVITE_HANDOFF_CACHE);
+      await cache.put(
+        new Request('/__fsv_invite_handoff__'),
+        new Response(JSON.stringify({ inviteToken: token }), {
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function loadInviteTokenFromPwaHandoff(): Promise<string> {
+  try {
+    const fromLs = localStorage.getItem(PWA_INVITE_HANDOFF_KEY);
+    if (fromLs) return fromLs;
+  } catch {
+    // ignore
+  }
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(PWA_INVITE_HANDOFF_CACHE);
+      const res = await cache.match(new Request('/__fsv_invite_handoff__'));
+      if (res) {
+        const data = (await res.json()) as { inviteToken?: string };
+        if (data?.inviteToken) return data.inviteToken;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return '';
+}
+
+async function clearInviteTokenHandoff(): Promise<void> {
+  try {
+    localStorage.removeItem(PWA_INVITE_HANDOFF_KEY);
+  } catch {
+    // ignore
+  }
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    try {
+      const cache = await window.caches.open(PWA_INVITE_HANDOFF_CACHE);
+      await cache.delete(new Request('/__fsv_invite_handoff__'));
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   vaultConfig,
-  bootstrapStatus,
   membersCount,
   detectedDevice,
   biometricProfile,
@@ -142,29 +177,17 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   onRequestDeviceAuthorization,
   onUnlockWithBiometrics,
   onCancelPendingState,
-  onSyncSharedVaultFromAdminDrive,
-  onResetLocalVaultInstance,
   }) => {
   const isVaultInitialized = Boolean(
-    bootstrapStatus?.initialized ||
-      (vaultConfig && vaultConfig.initialized) ||
-      membersCount > 0
+    (vaultConfig && vaultConfig.initialized) || membersCount > 0
   );
 
   // Invitation token from URL (?invite=...) or restored from PWA Handoff CacheStorage
   const [inviteToken, setInviteToken] = useState<string>(() => {
     if (typeof window === 'undefined') return '';
-    const parsed = parseCustomInviteUrlParameters(window.location.href);
-    return parsed.inviteToken || '';
+    return extractInviteTokenFromInput(window.location.search);
   });
-  const [handoffData, setHandoffData] = useState<PwaHandoffPayload | null>(
-    null
-  );
   const [isInitializingHandoff, setIsInitializingHandoff] = useState(true);
-  const [isSyncingSharedDrive, setIsSyncingSharedDrive] = useState(false);
-  const [sharedDriveSyncedMsg, setSharedDriveSyncedMsg] = useState<
-    string | null
-  >(null);
 
   const [manualInviteInput, setManualInviteInput] = useState('');
   const [showManualInviteBox, setShowManualInviteBox] = useState(false);
@@ -196,129 +219,57 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [isFamilyLoading, setIsFamilyLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // First-Admin Startup Wizard State & Remembered Admin Google Account
-  const [savedGoogleAdmin, setSavedGoogleAdmin] = useState(() =>
-    getSavedAdminGoogleAccount()
+  // Native Firebase Auth user state (persisted via browserLocalPersistence)
+  const [firebaseAuthUser, setFirebaseAuthUser] = useState<FirebaseUser | null>(
+    () => auth.currentUser
   );
   const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
-  const [showOptionalOAuthConfig, setShowOptionalOAuthConfig] = useState(false);
-  const [customOAuthClientId, setCustomOAuthClientId] = useState(
-    () => bootstrapStatus?.googleOAuthClientId || getOAuthClientId() || ''
-  );
-  const [oauthSavedMsg, setOauthSavedMsg] = useState<string | null>(null);
-  const [copiedOrigin, setCopiedOrigin] = useState(false);
   const [copiedCustomLink, setCopiedCustomLink] = useState(false);
-
-  const currentOrigin =
-    typeof window !== 'undefined' ? window.location.origin : '';
 
   // Strict PWA-only enforcement outside AI Studio
   const isRunningInInstalledPwa =
     isPWAInstalled || detectedDevice.clientMode === 'pwa';
   const isBrowserBlocked = !isAiStudioPreview && !isRunningInInstalledPwa;
 
-  // On mount: load public OAuth config (`vault-public-config.json`), save URL parameters into CacheStorage for PWA handoff, and restore handoff parameters inside installed PWA
+  // Listen to native Firebase Auth state (browserLocalPersistence)
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setFirebaseAuthUser(user);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Save/restore ?invite=TOKEN across browser -> installed PWA handoff
   useEffect(() => {
     let active = true;
-    async function initHandoffAndSharedDrive() {
+    async function initInviteHandoff() {
       try {
-        const publicClientId = await loadPublicRuntimeOAuthConfig();
-        if (active && publicClientId && !customOAuthClientId) {
-          setCustomOAuthClientId(publicClientId);
-        }
-
         if (typeof window !== 'undefined') {
-          const urlParsed = parseCustomInviteUrlParameters(
-            window.location.href
-          );
-          if (
-            urlParsed.inviteToken ||
-            urlParsed.driveFileId ||
-            urlParsed.syncEncryptionKey ||
-            urlParsed.googleOAuthClientId ||
-            urlParsed.driveAccessToken ||
-            urlParsed.inviteMetadataPacket
-          ) {
-            await savePwaHandoffParameters(urlParsed);
+          const urlInvite = extractInviteTokenFromInput(window.location.search);
+          if (urlInvite) {
+            await saveInviteTokenForPwaHandoff(urlInvite);
+            if (active) setInviteToken(urlInvite);
+            return;
           }
         }
-
-        const restored = await loadPwaHandoffParameters();
-        if (active) {
-          const synced = syncSavedAdminFromVaultState(vaultConfig);
-          if (synced) {
-            setSavedGoogleAdmin(synced);
-          }
-        }
-        if (!active || !restored) return;
-
-        setHandoffData(restored);
-        if (restored.savedAdminAccount) {
-          setSavedGoogleAdmin(getSavedAdminGoogleAccount());
-        }
-        if (restored.googleOAuthClientId && !customOAuthClientId) {
-          setCustomOAuthClientId(restored.googleOAuthClientId);
-        }
-
-        // Pull and decrypt the shared `.vault.enc` file from the Admin's Google Drive and/or seed the embedded invitation packet BEFORE verifying the invitation token
-        if (
-          onSyncSharedVaultFromAdminDrive &&
-          (restored.syncEncryptionKey ||
-            restored.driveFileId ||
-            restored.encryptedSnapshot ||
-            restored.inviteMetadataPacket ||
-            restored.inviteToken)
-        ) {
-          setIsSyncingSharedDrive(true);
-          try {
-            const ok = await onSyncSharedVaultFromAdminDrive({
-              driveFileId: restored.driveFileId,
-              syncEncryptionKey: restored.syncEncryptionKey,
-              encryptedSnapshot: restored.encryptedSnapshot,
-              inviteToken: restored.inviteToken,
-              driveAccessToken: restored.driveAccessToken,
-              inviteMetadataPacket: restored.inviteMetadataPacket,
-            });
-            if (active && ok) {
-              setSharedDriveSyncedMsg(
-                'Połączono ze wspólną bazą skarbca Administratora.'
-              );
-            }
-          } catch (err) {
-            console.warn('Synchronizacja wspólnego pliku z Google Drive:', err);
-          } finally {
-            if (active) setIsSyncingSharedDrive(false);
-          }
-        }
-
-        if (active && restored.inviteToken && !inviteToken) {
-          setInviteToken(restored.inviteToken);
+        const restoredToken = await loadInviteTokenFromPwaHandoff();
+        if (active && restoredToken && !inviteToken) {
+          setInviteToken(restoredToken);
         }
       } finally {
-        if (active) {
-          setIsInitializingHandoff(false);
-        }
+        if (active) setIsInitializingHandoff(false);
       }
     }
-
-    initHandoffAndSharedDrive();
+    initInviteHandoff();
     return () => {
       active = false;
     };
   }, []);
 
-  // Automatically detect and remember Admin Google Account from loaded vaultConfig database
-  useEffect(() => {
-    const synced = syncSavedAdminFromVaultState(vaultConfig);
-    if (synced) {
-      setSavedGoogleAdmin(synced);
-    }
-  }, [vaultConfig]);
-
-  // Verify invite token whenever `inviteToken` changes (ONLY after handoff initialization and shared Drive sync finish!)
+  // Verify invite token directly in Cloud Firestore whenever `inviteToken` changes
   useEffect(() => {
     let cancelled = false;
-    if (!inviteToken || isInitializingHandoff || isSyncingSharedDrive) {
+    if (!inviteToken || isInitializingHandoff) {
       if (!inviteToken) {
         setVerifiedInvite(null);
         setInviteError(null);
@@ -329,60 +280,20 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     setIsVerifyingInvite(true);
     setInviteError(null);
 
-    verifyInvitationTokenOnServer(inviteToken)
-      .then((res) => {
+    verifyInvitationTokenInFirestore(inviteToken)
+      .then((invitation) => {
         if (cancelled) return;
-        setVerifiedInvite(res.invitation);
+        setVerifiedInvite(invitation);
         if (
-          res.invitation.purpose === 'account_recovery' &&
-          res.invitation.targetUsername
+          invitation.purpose === 'account_recovery' &&
+          invitation.targetUsername
         ) {
-          setRegUsername(res.invitation.targetUsername);
-          setRegFullName(res.invitation.targetMemberName || '');
+          setRegUsername(invitation.targetUsername);
+          setRegFullName(invitation.targetMemberName || '');
         }
       })
       .catch((err) => {
         if (cancelled) return;
-        // Fallback 1: If the link carried an embedded `ip` metadata packet, use it directly
-        const decodedFromPacket = decodeInviteMetadataPacket(
-          handoffData?.inviteMetadataPacket
-        );
-        if (decodedFromPacket && decodedFromPacket.token === inviteToken) {
-          setVerifiedInvite(decodedFromPacket);
-          if (
-            decodedFromPacket.purpose === 'account_recovery' &&
-            decodedFromPacket.targetUsername
-          ) {
-            setRegUsername(decodedFromPacket.targetUsername);
-            setRegFullName(decodedFromPacket.targetMemberName || '');
-          }
-          setInviteError(null);
-          return;
-        }
-
-        // Fallback 2: If the link is a valid `inv_...` token from an Admin invitation link, synthesize the local invitation so the family member is NEVER blocked from submitting "Załóż mi konto"
-        if (inviteToken.startsWith('inv_')) {
-          const fallbackInvite: VaultInvitation = {
-            id: `id_${inviteToken}`,
-            token: inviteToken,
-            purpose: 'new_member',
-            mode: 'single_use',
-            invitedLabel: 'Zaproszenie do Skarbca Rodzinnego',
-            createdByMemberId: 'admin',
-            createdByMemberName: 'Główny Administrator',
-            status: 'active',
-            usedCount: 0,
-            maxUses: 1,
-            createdAt: new Date().toISOString(),
-            expiresAt: new Date(
-              Date.now() + 24 * 60 * 60 * 1000
-            ).toISOString(),
-          };
-          setVerifiedInvite(fallbackInvite);
-          setInviteError(null);
-          return;
-        }
-
         setVerifiedInvite(null);
         setInviteError(
           err instanceof Error
@@ -397,30 +308,19 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [
-    inviteToken,
-    isInitializingHandoff,
-    isSyncingSharedDrive,
-    handoffData?.inviteMetadataPacket,
-  ]);
+  }, [inviteToken, isInitializingHandoff]);
 
   const clearInviteFromUrlAndState = () => {
     setInviteToken('');
     setVerifiedInvite(null);
     setInviteError(null);
+    clearInviteTokenHandoff().catch(() => {});
     if (
       typeof window !== 'undefined' &&
-      (window.location.search.includes('invite=') ||
-        window.location.search.includes('gdf='))
+      window.location.search.includes('invite=')
     ) {
       const url = new URL(window.location.href);
       url.searchParams.delete('invite');
-      url.searchParams.delete('gdf');
-      url.searchParams.delete('vkey');
-      url.searchParams.delete('cid');
-      url.searchParams.delete('snap');
-      url.searchParams.delete('dt');
-      url.searchParams.delete('ip');
       window.history.replaceState({}, '', url.pathname + url.search);
     }
   };
@@ -443,13 +343,6 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     }
   };
 
-  const handleCopyOrigin = () => {
-    if (!currentOrigin) return;
-    navigator.clipboard.writeText(currentOrigin).catch(() => {});
-    setCopiedOrigin(true);
-    setTimeout(() => setCopiedOrigin(false), 2500);
-  };
-
   const handleCopyCurrentCustomUrl = () => {
     if (typeof window === 'undefined') return;
     navigator.clipboard.writeText(window.location.href).catch(() => {});
@@ -461,11 +354,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   if (isBrowserBlocked) {
     const hasCustomInviteInUrlOrHandoff = Boolean(
       inviteToken ||
-        handoffData?.inviteToken ||
-        handoffData?.driveFileId ||
         (typeof window !== 'undefined' &&
-          (window.location.search.includes('invite=') ||
-            window.location.search.includes('gdf=')))
+          window.location.search.includes('invite='))
     );
 
     return (
@@ -481,7 +371,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             Zainstaluj FamilyStream Vault jako aplikację PWA, aby kontynuować
           </h1>
           <p className="text-xs sm:text-sm text-[var(--vault-muted)] leading-relaxed">
-            Ze względów bezpieczeństwa oraz trwałego powiązania z bazą danych na Google Drive korzystanie ze skarbca w zwykłej karcie przeglądarki jest wyłączone. Zainstaluj aplikację lokalnie na swoim urządzeniu i otwórz ją z ikony na ekranie głównym.
+            Ze względów bezpieczeństwa oraz trwałego powiązania Certyfikatu Sprzętowego z bazą Cloud Firestore korzystanie ze skarbca w zwykłej karcie przeglądarki jest wyłączone. Zainstaluj aplikację lokalnie na swoim urządzeniu i otwórz ją z ikony na ekranie głównym.
           </p>
         </div>
 
@@ -491,10 +381,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               <CheckCircle2 className="w-4 h-4 text-[var(--vault-success)] shrink-0 mt-0.5" />
               <div className="space-y-1 text-xs">
                 <div className="font-semibold text-[var(--vault-text)]">
-                  Wykryto spersonalizowany link dostępowy do Skarbca Rodzinnego!
+                  Wykryto link zaproszeniowy do Skarbca Rodzinnego!
                 </div>
                 <p className="text-[var(--vault-muted)] leading-relaxed">
-                  Parametry zaproszenia oraz klucz odczytu wspólnego pliku z Google Drive Administratora zostały automatycznie zapisane w pamięci podręcznej <code>CacheStorage</code> tego urządzenia. Po zainstalowaniu i uruchomieniu aplikacji PWA Twoje zaproszenie otworzy się automatycznie.
+                  Token zaproszenia został zapisany w pamięci podręcznej tego urządzenia. Po zainstalowaniu i uruchomieniu aplikacji PWA Twoje zaproszenie otworzy się automatycznie i połączy z bazą Cloud Firestore.
                 </p>
               </div>
             </div>
@@ -506,7 +396,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               {copiedCustomLink ? (
                 <>
                   <Check className="w-3.5 h-3.5 text-[var(--vault-success)] shrink-0" />
-                  <span>Skopiowano spersonalizowany link do schowka!</span>
+                  <span>Skopiowano link zaproszeniowy do schowka!</span>
                 </>
               ) : (
                 <>
@@ -614,7 +504,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       <div className="max-w-lg mx-auto my-8 p-6 sm:p-8 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-6">
         <div className="space-y-2">
           <div className="text-xs font-medium text-[var(--vault-accent)]">
-            Dwuetapowa ochrona dostępu · Link Zaproszeniowy + Akceptacja
+            Dwuetapowa ochrona dostępu · Link Zaproszeniowy + Certyfikat Sprzętowy
           </div>
           <h2 className="text-xl font-bold font-display text-[var(--vault-text)]">
             {existingDevice && isDevicePending
@@ -626,7 +516,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             <strong className="text-[var(--vault-text)]">
               {member.fullName} (login: {member.username})
             </strong>
-            . Ze względów bezpieczeństwa dostęp do haseł otworzy się dopiero wtedy, gdy Administrator lub Zaufany Opiekun (np. brat) kliknie „Akceptuj” w swoim panelu.
+            . Ze względów bezpieczeństwa dostęp do haseł otworzy się natychmiast (przez nasłuchiwanie czasu rzeczywistego <code>onSnapshot</code>), gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj” w swoim panelu.
           </p>
         </div>
 
@@ -714,13 +604,13 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               <Clock className="w-4 h-4 text-[var(--vault-accent)]" />
               <span>
                 {isAccountPending
-                  ? 'Prośba „Załóż mi konto” została wysłana!'
-                  : 'Prośba o autoryzację urządzenia została wysłana!'}
+                  ? 'Prośba „Załóż mi konto” została zapisana w Cloud Firestore!'
+                  : 'Prośba o autoryzację urządzenia została zapisana w Cloud Firestore!'}
               </span>
             </div>
             <p className="text-xs text-[var(--vault-muted)]">
               {isAccountPending
-                ? 'Twoje zgłoszenie jest widoczne w zakładce „02. Zaproszenia, Konta i Opiekunowie”. Gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj”, skarbiec otworzy się automatycznie na tym ekranie.'
+                ? 'Twoje zgłoszenie jest już widoczne w czasie rzeczywistym u Administratora i Zaufanego Opiekuna. Gdy klikną „Akceptuj”, skarbiec otworzy się automatycznie na tym ekranie.'
                 : 'Twoje urządzenie czeka na zatwierdzenie. Gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj”, skarbiec otworzy się automatycznie.'}
             </p>
           </div>
@@ -735,70 +625,60 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             Wróć do ekranu logowania
           </button>
           <span className="text-[var(--vault-muted)]">
-            Synchronizacja czasu rzeczywistego aktywna
+            Cloud Firestore onSnapshot aktywny
           </span>
         </div>
       </div>
     );
   }
 
-  // Handlers
-  const handleAdminClick = async (forceChooser = false) => {
+  // Native Firebase Auth Google login handler
+  const handleAdminClick = async (forceAccountSelection = false) => {
     setErrorMsg(null);
     setIsAdminLoading(true);
     try {
-      if (forceChooser) {
-        clearSavedAdminGoogleAccount();
-        setSavedGoogleAdmin(null);
+      let userToUse = !forceAccountSelection ? auth.currentUser : null;
+      if (!userToUse) {
+        if (forceAccountSelection) {
+          googleProvider.setCustomParameters({ prompt: 'select_account' });
+        } else {
+          const hintEmail =
+            vaultConfig?.adminEmail &&
+            !vaultConfig.adminEmail.endsWith('.local')
+              ? vaultConfig.adminEmail
+              : undefined;
+          googleProvider.setCustomParameters(
+            hintEmail ? { login_hint: hintEmail } : {}
+          );
+        }
+        const credential = await signInWithPopup(auth, googleProvider);
+        userToUse = credential.user;
       }
-      if (customOAuthClientId.trim()) {
-        setConfiguredGoogleOAuthClientId(customOAuthClientId.trim());
-        await saveGoogleOAuthClientIdOnServer(customOAuthClientId.trim()).catch(
-          () => {}
+
+      await onAdminGoogleLogin({
+        firebaseUser: userToUse,
+        masterPassword: adminMasterPasswordInput.trim() || undefined,
+      });
+    } catch (err) {
+      const code = (err as { code?: string })?.code || '';
+      if (code === 'auth/unauthorized-domain') {
+        const host =
+          typeof window !== 'undefined' ? window.location.hostname : '';
+        setErrorMsg(
+          `Domena „${host}” nie jest jeszcze dodana do autoryzowanych domen w Firebase Auth. Dodaj ją w Firebase Console -> Authentication -> Settings -> Authorized domains.`
+        );
+      } else if (code === 'auth/popup-closed-by-user') {
+        setErrorMsg('Zamknięto okno logowania Google przed wyborem konta.');
+      } else {
+        setErrorMsg(
+          err instanceof Error
+            ? err.message
+            : 'Nie udało się zalogować jako Administrator przez Firebase Auth.'
         );
       }
-      const detectedEmail = !forceChooser
-        ? savedGoogleAdmin?.email ||
-          (vaultConfig?.adminEmail &&
-          !vaultConfig.adminEmail.endsWith('.local')
-            ? vaultConfig.adminEmail
-            : undefined)
-        : undefined;
-      await onAdminGoogleLogin({
-        email: detectedEmail,
-        displayName: !forceChooser ? savedGoogleAdmin?.displayName : undefined,
-        masterPassword: adminMasterPasswordInput.trim() || undefined,
-        skipOAuthPopup: !forceChooser && Boolean(detectedEmail),
-        forceAccountChooser: forceChooser,
-      });
-      setSavedGoogleAdmin(getSavedAdminGoogleAccount());
-    } catch (err) {
-      const code = (err as { code?: string })?.code;
-      const message =
-        err instanceof Error
-          ? err.message
-          : 'Nie udało się zalogować jako Administrator przez Google.';
-      if (
-        code === 'MISSING_GOOGLE_CLIENT_ID' ||
-        message.includes('Client ID')
-      ) {
-        setShowOptionalOAuthConfig(true);
-      }
-      setErrorMsg(message);
     } finally {
       setIsAdminLoading(false);
     }
-  };
-
-  const handleSaveOptionalClientId = async () => {
-    const cleaned = customOAuthClientId.trim();
-    setConfiguredGoogleOAuthClientId(cleaned);
-    await saveGoogleOAuthClientIdOnServer(cleaned).catch(() => {});
-    setOauthSavedMsg(
-      cleaned
-        ? 'Zapisano identyfikator Google OAuth Client ID! Kliknij teraz przycisk „Zaloguj przez Google” powyżej.'
-        : 'Wyczyszczono identyfikator Google OAuth Client ID.'
-    );
   };
 
   
@@ -903,258 +783,19 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
 
   const handleApplyManualInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    const raw = manualInviteInput.trim();
-    if (!raw) return;
-
-    const parsed = parseCustomInviteUrlParameters(raw);
-    await savePwaHandoffParameters(parsed);
-    const updatedHandoff = await loadPwaHandoffParameters();
-    if (updatedHandoff) {
-      setHandoffData(updatedHandoff);
-    }
-
-    if (
-      onSyncSharedVaultFromAdminDrive &&
-      (parsed.syncEncryptionKey ||
-        parsed.driveFileId ||
-        parsed.encryptedSnapshot ||
-        parsed.inviteMetadataPacket ||
-        parsed.inviteToken)
-    ) {
-      setIsSyncingSharedDrive(true);
-      try {
-        const ok = await onSyncSharedVaultFromAdminDrive({
-          driveFileId: parsed.driveFileId,
-          syncEncryptionKey: parsed.syncEncryptionKey,
-          encryptedSnapshot: parsed.encryptedSnapshot,
-          inviteToken: parsed.inviteToken,
-          driveAccessToken: parsed.driveAccessToken,
-          inviteMetadataPacket: parsed.inviteMetadataPacket,
-        });
-        if (ok) {
-          setSharedDriveSyncedMsg(
-            'Połączono ze wspólną bazą skarbca Administratora.'
-          );
-        }
-      } catch (err) {
-        console.warn('Błąd odczytu wspólnego pliku z linku:', err);
-      } finally {
-        setIsSyncingSharedDrive(false);
-      }
-    }
-
-    const extracted = parsed.inviteToken || extractInviteTokenFromInput(raw);
+    const extracted = extractInviteTokenFromInput(manualInviteInput);
     if (!extracted) return;
+    await saveInviteTokenForPwaHandoff(extracted);
     setInviteToken(extracted);
     setShowManualInviteBox(false);
     setManualInviteInput('');
   };
 
-  const renderGoogleOAuthClientSetupBox = () => {
-    const hasConfiguredId = Boolean(customOAuthClientId.trim());
-    return (
-      <div className="pt-3 border-t border-[var(--vault-border)] space-y-3 text-xs">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() => setShowOptionalOAuthConfig((v) => !v)}
-            className="inline-flex items-center gap-1.5 text-xs text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer text-left"
-          >
-            <KeyRound className="w-3.5 h-3.5 shrink-0" />
-            <span>
-              {showOptionalOAuthConfig
-                ? 'Ukryj instrukcję i konfigurację Google OAuth Client ID'
-                : 'Skąd wziąć Google OAuth Client ID? (Instrukcja krok po kroku + Wklejenie ID)'}
-            </span>
-          </button>
-
-          <span
-            className={`text-[11px] font-mono px-2 py-0.5 rounded border ${
-              hasConfiguredId
-                ? 'border-[var(--vault-success)] text-[var(--vault-success)]'
-                : 'border-[var(--vault-warning)] text-[var(--vault-warning)]'
-            }`}
-          >
-            {hasConfiguredId ? 'Client ID: Aktywny' : 'Brak Client ID'}
-          </span>
-        </div>
-
-        {(showOptionalOAuthConfig || !hasConfiguredId) && (
-          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-4">
-            <div className="space-y-1.5">
-              <div className="font-semibold text-[var(--vault-text)]">
-                Dlaczego podajesz własny Google OAuth Client ID?
-              </div>
-              <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
-                <strong>Client ID</strong> (kończący się na <code>.apps.googleusercontent.com</code>) to publiczny identyfikator Twojej własnej instancji skarbca. Pozwala przeglądarce wyświetlić oficjalne okno <strong>„Wybierz konto Google”</strong> i zapisać zaszyfrowany plik <code>FamilyStreamVault_AutoSync.vault.enc</code> bezpośrednio na Twoim prywatnym Google Drive — bez udziału obcych serwerów. Konfiguruje go <strong>tylko raz Główny Administrator</strong>.
-              </p>
-            </div>
-
-            {/* STEP-BY-STEP GUIDE FOR USERS */}
-            <div className="p-3.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-3">
-              <div className="text-xs font-bold text-[var(--vault-text)]">
-                Instrukcja krok po kroku: Jak wyciągnąć swój Client ID z ustawień Google (2 minuty)
-              </div>
-
-              <ol className="list-decimal list-inside space-y-2.5 text-[11px] text-[var(--vault-muted)] leading-relaxed">
-                <li>
-                  <strong className="text-[var(--vault-text)]">
-                    Utwórz projekt w konsoli Google:
-                  </strong>{' '}
-                  Otwórz w przeglądarce stronę{' '}
-                  <a
-                    href="https://console.cloud.google.com/projectcreate"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono break-all"
-                  >
-                    console.cloud.google.com/projectcreate
-                  </a>
-                  , zaloguj się na swoje konto Google, wpisz dowolną nazwę (np.{' '}
-                  <code>FamilyStream Vault</code>) i kliknij <strong>Create (Utwórz)</strong>.
-                </li>
-
-                <li>
-                  <strong className="text-[var(--vault-text)]">
-                    Włącz obsługę Google Drive API:
-                  </strong>{' '}
-                  Przejdź do{' '}
-                  <a
-                    href="https://console.cloud.google.com/apis/library/drive.googleapis.com"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono break-all"
-                  >
-                    console.cloud.google.com/apis/library/drive.googleapis.com
-                  </a>{' '}
-                  i kliknij niebieski przycisk <strong>Enable (Włącz)</strong>, aby skarbiec mógł zapisywać zaszyfrowany plik kopii na Twoim Dysku Google.
-                </li>
-
-                <li>
-                  <strong className="text-[var(--vault-text)]">
-                    Dodaj swój e-mail jako testera (naprawia „Błąd 403: access_denied”):
-                  </strong>{' '}
-                  Otwórz zakładkę{' '}
-                  <a
-                    href="https://console.cloud.google.com/auth/audience"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono break-all"
-                  >
-                    console.cloud.google.com/auth/audience
-                  </a>{' '}
-                  (lub{' '}
-                  <a
-                    href="https://console.cloud.google.com/apis/credentials/consent"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono break-all"
-                  >
-                    OAuth consent screen → Audience
-                  </a>
-                  ):
-                  <ul className="list-disc list-inside pl-3 mt-1 space-y-1">
-                    <li>
-                      Zjedź niżej do sekcji <strong>Test users (Użytkownicy testowi)</strong>, kliknij przycisk <strong>+ Add users (Dodaj użytkowników)</strong>, wpisz swój własny adres Gmail (np. <code>stradowski@gmail.com</code>) i kliknij <strong>Save (Zapisz)</strong>.
-                    </li>
-                    <li>
-                      <em>Alternatywnie:</em> w sekcji <strong>Publishing status</strong> możesz kliknąć <strong>Publish App (Opublikuj aplikację)</strong> — wtedy nie trzeba dopisywać adresów do listy testerów.
-                    </li>
-                  </ul>
-                </li>
-
-                <li>
-                  <strong className="text-[var(--vault-text)]">
-                    Wygeneruj i skopiuj OAuth Client ID:
-                  </strong>{' '}
-                  Wejdź na{' '}
-                  <a
-                    href="https://console.cloud.google.com/apis/credentials/oauthclient"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[var(--vault-accent)] underline font-mono break-all"
-                  >
-                    console.cloud.google.com/apis/credentials/oauthclient
-                  </a>
-                  :
-                  <ul className="list-disc list-inside pl-3 mt-1 space-y-1">
-                    <li>
-                      Jako <strong>Application type (Typ aplikacji)</strong> wybierz <strong>Web application (Aplikacja internetowa)</strong>.
-                    </li>
-                    <li>
-                      W sekcji <strong>Authorized JavaScript origins (Autoryzowane źródła JavaScript)</strong> kliknij <strong>+ Add URI</strong> i wklej poniższy adres domeny głównej (<strong>ważne:</strong> bez ukośnika <code>/</code> i bez <code>/hasla</code> na końcu!):
-                    </li>
-                  </ul>
-                </li>
-              </ol>
-
-              {currentOrigin && (
-                <div className="p-2.5 rounded-lg border border-[var(--vault-accent)] bg-[var(--vault-bg)] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-[10px] text-[var(--vault-muted)]">
-                      Adres do wklejenia w polu „Authorized JavaScript origins”:
-                    </div>
-                    <div className="text-xs font-mono font-bold text-[var(--vault-accent)] break-all">
-                      {currentOrigin}
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleCopyOrigin}
-                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-md cursor-pointer shrink-0"
-                  >
-                    {copiedOrigin ? (
-                      <>
-                        <Check className="w-3.5 h-3.5" />
-                        <span>Skopiowano adres!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="w-3.5 h-3.5" />
-                        <span>Kopiuj Origin</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              )}
-
-              <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
-                Po kliknięciu <strong>Create</strong> w konsoli Google pojawi się okienko z Twoim identyfikatorem <strong>Client ID</strong> (np. <code>123456789-abc...apps.googleusercontent.com</code>). Skopiuj go i wklej poniżej:
-              </p>
-            </div>
-
-            {/* INPUT FIELD FOR CLIENT ID */}
-            <div className="space-y-2">
-              <label className="block text-[11px] font-semibold text-[var(--vault-text)]">
-                Wklej tutaj swój identyfikator Google OAuth Client ID:
-              </label>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  type="text"
-                  value={customOAuthClientId}
-                  onChange={(e) => setCustomOAuthClientId(e.target.value)}
-                  placeholder="np. 1234567890-abcdefg.apps.googleusercontent.com"
-                  className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)] min-w-0"
-                />
-                <button
-                  type="button"
-                  onClick={handleSaveOptionalClientId}
-                  className="px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer shrink-0"
-                >
-                  Zapisz Client ID
-                </button>
-              </div>
-              {oauthSavedMsg && (
-                <div className="text-[11px] font-medium text-[var(--vault-success)]">
-                  {oauthSavedMsg}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
+  const rememberedAdminEmail =
+    firebaseAuthUser?.email ||
+    (vaultConfig?.adminEmail && !vaultConfig.adminEmail.endsWith('.local')
+      ? vaultConfig.adminEmail
+      : null);
 
   return (
     <div className="max-w-lg mx-auto my-4 space-y-6">
@@ -1172,7 +813,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
           </div>
           <p className="text-[11px] text-[var(--vault-muted)]">
             {isRunningInInstalledPwa
-              ? 'Kliknij „Aktualizuj aplikację”, aby pobrać najnowszą wersję kodu z GitHub Pages bez utraty danych.'
+              ? 'Kliknij „Aktualizuj aplikację”, aby pobrać najnowszą wersję kodu z GitHub Pages bez utraty danych w Cloud Firestore.'
               : 'Zainstaluj jako aplikację PWA na telefonie lub zaktualizuj program jednym kliknięciem.'}
           </p>
         </div>
@@ -1207,28 +848,21 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         </div>
       </div>
 
-      {sharedDriveSyncedMsg && (
-        <div className="p-3.5 rounded-xl border border-[var(--vault-success)] bg-[var(--vault-surface)] flex items-center gap-2.5 text-xs text-[var(--vault-success)]">
-          <Cloud className="w-4 h-4 shrink-0" />
-          <span>{sharedDriveSyncedMsg}</span>
-        </div>
-      )}
-
-      {/* CASE 1: FRESH UNINITIALIZED INSTANCE IN INSTALLED PWA -> ADMIN GOOGLE LOGIN & DRIVE CHECK */}
+      {/* CASE 1: FRESH UNINITIALIZED INSTANCE -> ADMIN FIREBASE GOOGLE AUTH */}
       {!isVaultInitialized && !inviteToken ? (
         <div className="p-5 sm:p-7 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5 overflow-hidden">
           <div className="space-y-2">
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
               <Cloud className="w-4 h-4 shrink-0" />
               <span>
-                Autoryzacja Głównego Administratora · Google OAuth + Google Drive
+                Autoryzacja Głównego Administratora · Firebase Auth + Cloud Firestore
               </span>
             </div>
             <h1 className="text-xl font-bold font-display text-[var(--vault-text)]">
-              Połącz konto Google i sprawdź lub utwórz Skarbiec na Google Drive
+              Zaloguj się kontem Google i zainicjalizuj Skarbiec w Cloud Firestore
             </h1>
             <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
-              Kliknij przycisk poniżej, aby otworzyć oficjalne okno wyboru konta Google. Aplikacja automatycznie sprawdzi na Twoim Google Drive, czy istnieje już zaszyfrowany plik <code>FamilyStreamVault_AutoSync.vault.enc</code> — jeśli tak, pobierze i odtworzy Twój skarbiec; jeśli to pierwsze logowanie, utworzy nową bazę.
+              Kliknij przycisk poniżej, aby zalogować się przez <strong>Firebase Authentication</strong>. Sesja zostanie natywnie zapamiętana w przeglądarce (<code>browserLocalPersistence</code>), a szyfrowanie haseł (E2E AES-256-GCM) odbywa się w 100% lokalnie na Twoim urządzeniu.
             </p>
           </div>
 
@@ -1287,18 +921,18 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 </div>
                 <span className="gsi-material-button-contents">
                   {isAdminLoading
-                    ? 'Logowanie i sprawdzanie Google Drive...'
-                    : savedGoogleAdmin
-                      ? `Zaloguj jako Administrator (${savedGoogleAdmin.email})`
-                      : 'Zaloguj przez Google (Wybierz konto i sprawdź Google Drive)'}
+                    ? 'Logowanie przez Firebase Auth...'
+                    : rememberedAdminEmail
+                      ? `Zaloguj jako Administrator (${rememberedAdminEmail})`
+                      : 'Zaloguj przez Google (Firebase Auth)'}
                 </span>
               </div>
             </button>
 
-            {savedGoogleAdmin && (
+            {rememberedAdminEmail && (
               <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
                 <span>
-                  Zapamiętano wybrane konto: <strong>{savedGoogleAdmin.email}</strong>
+                  Aktywna sesja Firebase Auth: <strong>{rememberedAdminEmail}</strong>
                 </span>
                 <button
                   type="button"
@@ -1312,10 +946,10 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             )}
           </div>
 
-          {/* Manual invite paste for family member who installed clean PWA first */}
+          {/* Manual invite paste for family member */}
           <div className="pt-2 border-t border-[var(--vault-border)] space-y-2 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
-              <span>Jesteś domownikiem i otrzymałeś spersonalizowany link od Admina?</span>
+              <span>Jesteś domownikiem i otrzymałeś link zaproszeniowy od Admina?</span>
               <button
                 type="button"
                 onClick={() => setShowManualInviteBox((v) => !v)}
@@ -1335,36 +969,27 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                   type="text"
                   value={manualInviteInput}
                   onChange={(e) => setManualInviteInput(e.target.value)}
-                  placeholder="Wklej pełny link zaproszeniowy od Administratora..."
+                  placeholder="Wklej link zaproszeniowy od Administratora..."
                   className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
                 />
                 <button
                   type="submit"
-                  disabled={isSyncingSharedDrive}
                   className="px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
                 >
-                  {isSyncingSharedDrive
-                    ? 'Pobieranie bazy...'
-                    : 'Pobierz bazę i otwórz'}
+                  Otwórz zaproszenie
                 </button>
               </form>
             )}
           </div>
-
-          {renderGoogleOAuthClientSetupBox()}
         </div>
       ) : null}
 
       {/* CASE 2: INVITATION OR RECOVERY LINK MODE (?invite=TOKEN) */}
       {inviteToken && (
         <div className="p-6 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5">
-          {isInitializingHandoff ||
-          isSyncingSharedDrive ||
-          isVerifyingInvite ? (
+          {isInitializingHandoff || isVerifyingInvite ? (
             <div className="py-6 text-center text-xs text-[var(--vault-muted)]">
-              {isSyncingSharedDrive || isInitializingHandoff
-                ? 'Pobieranie i odszyfrowywanie wspólnego pliku skarbca z Google Drive Administratora...'
-                : 'Weryfikacja kryptograficznego linku zaproszeniowego...'}
+              Weryfikacja kryptograficznego linku zaproszeniowego w Cloud Firestore...
             </div>
           ) : inviteError || !verifiedInvite ? (
             <div className="space-y-4">
@@ -1372,11 +997,11 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
                 <div className="space-y-1">
                   <h2 className="text-base font-bold font-display text-[var(--vault-text)]">
-                    Link zaproszeniowy wymaga synchronizacji z bazą Administratora
+                    Link zaproszeniowy jest nieaktywny
                   </h2>
                   <p className="text-xs text-[var(--vault-danger)]">
                     {inviteError ||
-                      'Ten link został już wykorzystany, stracił ważność lub brakuje połączenia ze wspólnym plikiem Google Drive.'}
+                      'Ten link został już wykorzystany lub stracił ważność. Poproś Administratora o nowy link.'}
                   </p>
                 </div>
               </div>
@@ -1602,7 +1227,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 </span>
               </div>
               <p className="text-xs text-[var(--vault-muted)]">
-                Wpisz swój login oraz hasło. Klucz deszyfrujący Twoje prywatne hasła powstaje z połączenia Twojego hasła, profilu sprzętowego tego urządzenia oraz certyfikatu zatwierdzenia.
+                Wpisz swój login oraz hasło. Klucz deszyfrujący Twoje prywatne hasła powstaje lokalnie z połączenia Twojego hasła, profilu sprzętowego tego urządzenia oraz certyfikatu zatwierdzenia.
               </p>
               <div className="p-2.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-[var(--vault-muted)] mt-2">
                 <span>
@@ -1663,7 +1288,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 <LogIn className="w-4 h-4" />
                 <span>
                   {isFamilyLoading
-                    ? 'Weryfikacja sesji...'
+                    ? 'Weryfikacja certyfikatu sprzętowego...'
                     : 'Zaloguj się do skarbca'}
                 </span>
               </button>
@@ -1673,7 +1298,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             <div className="pt-3 border-t border-[var(--vault-border)] space-y-2.5 text-xs">
               <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
                 <span>
-                  Nie masz konta lub zapomniałeś hasła? Poproś Administratora lub Zaufanego Opiekuna (np. brata) o spersonalizowany link.
+                  Nie masz konta lub zapomniałeś hasła? Poproś Administratora lub Zaufanego Opiekuna o link zaproszeniowy.
                 </span>
                 <button
                   type="button"
@@ -1695,47 +1320,35 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                     type="text"
                     value={manualInviteInput}
                     onChange={(e) => setManualInviteInput(e.target.value)}
-                    placeholder="Wklej tutaj spersonalizowany link zaproszeniowy..."
+                    placeholder="Wklej tutaj link zaproszeniowy..."
                     className="flex-1 px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
                   />
                   <button
                     type="submit"
-                    disabled={isSyncingSharedDrive}
                     className="px-3.5 py-1.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
                   >
-                    {isSyncingSharedDrive
-                      ? 'Synchronizacja...'
-                      : 'Otwórz zaproszenie'}
+                    Otwórz zaproszenie
                   </button>
                 </form>
               )}
             </div>
           </div>
 
-          {/* SECTION B: PRIMARY ADMINISTRATOR GOOGLE LOGIN */}
+          {/* SECTION B: PRIMARY ADMINISTRATOR FIREBASE GOOGLE LOGIN */}
           <div className="p-6 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-4">
             <div className="space-y-1.5">
               <div className="flex items-center justify-between gap-2 text-xs">
                 <span className="font-semibold text-[var(--vault-accent)]">
-                  02. Główny Administrator Skarbca (Google OAuth + Google Drive)
+                  02. Główny Administrator Skarbca (Firebase Auth + Cloud Firestore)
                 </span>
                 <span className="inline-flex items-center gap-1 font-mono text-[11px] text-[var(--vault-muted)] shrink-0">
                   <Lock className="w-3 h-3 text-[var(--vault-success)]" />
-                  <span>AES-256-GCM</span>
+                  <span>E2E AES-256-GCM</span>
                 </span>
               </div>
               <p className="text-xs text-[var(--vault-muted)] leading-relaxed">
                 Konto Głównego Administratora (
-                <strong>
-                  {savedGoogleAdmin?.email ||
-                    vaultConfig?.adminEmail ||
-                    bootstrapStatus?.adminEmailHint ||
-                    'zainicjalizowane'}
-                </strong>
-                ) oraz szyfrowany plik kopii na Google Drive są aktywne.{' '}
-                {savedGoogleAdmin
-                  ? 'Twoje wybrane konto Google jest zapamiętane na tym urządzeniu — kliknięcie poniżej zaloguje Cię od razu bez ponownego wybierania konta.'
-                  : 'Kliknij przycisk poniżej, aby wybrać konto Google i zapamiętać je na tym urządzeniu.'}
+                <strong>{rememberedAdminEmail || 'zainicjalizowane'}</strong>) jest chronione przez Firebase Auth z trwałym podtrzymywaniem sesji (<code>browserLocalPersistence</code>).
               </p>
             </div>
 
@@ -1776,27 +1389,20 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                   <span className="gsi-material-button-contents">
                     {isAdminLoading
                       ? 'Odblokowywanie skarbca Administratora...'
-                      : savedGoogleAdmin ||
-                          (vaultConfig?.adminEmail &&
-                            !vaultConfig.adminEmail.endsWith('.local'))
-                        ? `Zaloguj jako Administrator (${
-                            savedGoogleAdmin?.email || vaultConfig?.adminEmail
-                          })`
+                      : rememberedAdminEmail
+                        ? `Zaloguj jako Administrator (${rememberedAdminEmail})`
                         : 'Zaloguj jako Główny Administrator przez Google'}
                   </span>
                 </div>
               </button>
 
-              {(savedGoogleAdmin ||
-                (vaultConfig?.adminEmail &&
-                  !vaultConfig.adminEmail.endsWith('.local'))) && (
+              {rememberedAdminEmail && (
                 <div className="flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)] px-1">
                   <span>
-                    Wykryte konto Admina w bazie:{' '}
+                    Konto Admina:{' '}
                     <strong className="text-[var(--vault-text)]">
-                      {savedGoogleAdmin?.email || vaultConfig?.adminEmail}
-                    </strong>{' '}
-                    (logowanie 1 kliknięciem bez okna Google)
+                      {rememberedAdminEmail}
+                    </strong>
                   </span>
                   <button
                     type="button"
@@ -1809,33 +1415,9 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                 </div>
               )}
             </div>
-
-            {onResetLocalVaultInstance && (
-              <div className="pt-1 flex items-center justify-between gap-2 text-[11px] text-[var(--vault-muted)]">
-                <span>
-                  Widzisz stare konto testowe (np. <code>adm***@familystream.local</code>)?
-                </span>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    clearSavedAdminGoogleAccount();
-                    setSavedGoogleAdmin(null);
-                    await onResetLocalVaultInstance();
-                  }}
-                  className="inline-flex items-center gap-1 text-[var(--vault-accent)] hover:underline font-medium cursor-pointer shrink-0"
-                >
-                  <RotateCcw className="w-3 h-3" />
-                  <span>Zresetuj lokalny stan urządzenia</span>
-                </button>
-              </div>
-            )}
-
-            {renderGoogleOAuthClientSetupBox()}
-
-                      </div>
+          </div>
         </>
       )}
     </div>
   );
 };
-
