@@ -661,138 +661,192 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     );
   }
 
+  // Reusable top bar for 1-tap PWA Service Worker update across all pre-login screens
+  const renderTopPwaUpdateBar = () => (
+    <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-surface)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div className="space-y-0.5">
+        <div className="text-xs font-semibold text-[var(--vault-text)] flex items-center gap-1.5">
+          <Smartphone className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
+          <span>
+            {isRunningInInstalledPwa
+              ? 'Aplikacja FamilyStream Vault działa w trybie zainstalowanym (PWA)'
+              : 'Zainstaluj skarbiec jako aplikację PWA'}
+          </span>
+        </div>
+        <p className="text-[11px] text-[var(--vault-muted)]">
+          {isRunningInInstalledPwa
+            ? 'Kliknij „Aktualizuj aplikację”, aby pobrać najnowszą wersję kodu z GitHub Pages bez utraty danych w Cloud Firestore.'
+            : 'Zainstaluj jako aplikację PWA na telefonie lub zaktualizuj program jednym kliknięciem.'}
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2 shrink-0">
+        {!isRunningInInstalledPwa && (
+          <button
+            type="button"
+            onClick={onInstallPWA}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5 shrink-0" />
+            <span>Zainstaluj jako aplikację (PWA)</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={() => onTriggerAppUpdate()}
+          disabled={isUpdatingApp}
+          className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-bg)] hover:bg-[var(--vault-surface-hover)] rounded-lg transition-colors cursor-pointer"
+        >
+          <RefreshCw
+            className={`w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0 ${
+              isUpdatingApp ? 'animate-spin' : ''
+            }`}
+          />
+          <span>
+            {isUpdatingApp ? 'Aktualizowanie...' : 'Aktualizuj aplikację'}
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+
   // ============================================================================
   // GATEKEEP 2: CLEAN PWA WITHOUT FIREBASE CONFIG -> ADMIN LOCAL JSON LOADER
   // ============================================================================
   if (!firebaseReady || showChangeFirebaseConfigModal) {
     return (
-      <div className="max-w-lg mx-auto my-6 p-6 sm:p-8 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-6 shadow-md">
-        <div className="space-y-2">
-          <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
-            <Database className="w-4 h-4 shrink-0" />
-            <span>
-              Krok 02 · Inicjalizacja Własnej Instancji Skarbca (Brak Configu w GitHub)
-            </span>
-          </div>
-          <h1 className="text-xl sm:text-2xl font-bold font-display text-[var(--vault-text)] leading-snug">
-            Załaduj lokalnie plik JSON konfiguracji Firebase
-          </h1>
-          <p className="text-xs sm:text-sm text-[var(--vault-muted)] leading-relaxed">
-            Publiczne repozytorium na GitHubie nie przechowuje żadnych kluczy Firebase. Wgraj swój plik <code className="font-mono text-[var(--vault-text)]">firebase-config.json</code> lub wklej obiekt konfiguracyjny poniżej — to wyzwoli utworzenie instancji Administratora i otworzy logowanie Google.
-          </p>
-        </div>
+      <div className="max-w-lg mx-auto my-4 space-y-6">
+        {renderTopPwaUpdateBar()}
 
-        {/* Collapsible Step-by-Step Guide & Module Educational Explanation */}
-        <FirebaseSetupGuideDropdown />
-
-        {/* Option A: 1-Tap File Upload (.json) */}
-        <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-3">
-          <div className="text-xs font-semibold text-[var(--vault-text)]">
-            Opcja A (Najszybsza): Wybierz plik <code className="font-mono">.json</code> z pamięci urządzenia
-          </div>
-          <label className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer shadow-sm">
-            <Upload className="w-4 h-4 shrink-0" />
-            <span>Wybierz plik firebase-config.json z urządzenia</span>
-            <input
-              type="file"
-              accept=".json,application/json,text/plain"
-              onChange={handleFirebaseJsonFileSelect}
-              className="hidden"
-            />
-          </label>
-        </div>
-
-        {/* Option B: Paste JSON or firebaseConfig snippet */}
-        <form onSubmit={handleFirebaseJsonSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
-              Opcja B: Wklej zawartość JSON lub obiekt <code className="font-mono">firebaseConfig</code> z Firebase Console
-            </label>
-            <textarea
-              rows={6}
-              value={rawFirebaseJsonInput}
-              onChange={(e) => setRawFirebaseJsonInput(e.target.value)}
-              placeholder={`{\n  "apiKey": "AIzaSy...",\n  "authDomain": "twoj-projekt.firebaseapp.com",\n  "projectId": "twoj-projekt",\n  "appId": "1:...",\n  "firestoreDatabaseId": "(default)"\n}`}
-              className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
-            />
-          </div>
-
-          <div>
-            <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
-              Opcjonalne ID bazy Firestore (pozostaw puste jeśli jest w JSON lub używasz domyślnej bazy)
-            </label>
-            <input
-              type="text"
-              value={customDatabaseIdInput}
-              onChange={(e) => setCustomDatabaseIdInput(e.target.value)}
-              placeholder="np. ai-studio-... lub zostaw puste dla (default)"
-              className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
-            />
-          </div>
-
-          {firebaseConfigError && (
-            <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
-              {firebaseConfigError}
+        <div className="p-6 sm:p-8 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-6 shadow-md">
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
+              <Database className="w-4 h-4 shrink-0" />
+              <span>
+                Krok 02 · Inicjalizacja Własnej Instancji Skarbca (Brak Configu w GitHub)
+              </span>
             </div>
-          )}
-
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="submit"
-              className="flex-1 inline-flex items-center justify-center gap-2 px-5 py-3 text-xs sm:text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer"
-            >
-              <CheckCircle2 className="w-4 h-4 shrink-0" />
-              <span>Załaduj konfigurację i uruchom jako Administrator</span>
-            </button>
-
-            {showChangeFirebaseConfigModal && firebaseReady && (
-              <button
-                type="button"
-                onClick={() => setShowChangeFirebaseConfigModal(false)}
-                className="px-4 py-3 text-xs font-semibold text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded-xl cursor-pointer"
-              >
-                Anuluj
-              </button>
-            )}
+            <h1 className="text-xl sm:text-2xl font-bold font-display text-[var(--vault-text)] leading-snug">
+              Załaduj lokalnie plik JSON konfiguracji Firebase
+            </h1>
+            <p className="text-xs sm:text-sm text-[var(--vault-muted)] leading-relaxed">
+              Publiczne repozytorium na GitHubie nie przechowuje żadnych kluczy Firebase. Wgraj swój plik <code className="font-mono text-[var(--vault-text)]">firebase-config.json</code> lub wklej obiekt konfiguracyjny poniżej — to wyzwoli utworzenie instancji Administratora i otworzy logowanie Google.
+            </p>
           </div>
-        </form>
 
-        {/* Family Member Invite Link Paste Fallback */}
-        <div className="pt-4 border-t border-[var(--vault-border)] space-y-2.5 text-xs">
-          <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
-            <span>
-              Jesteś domownikiem i otrzymałeś link zaproszeniowy od Administratora?
-            </span>
-            <button
-              type="button"
-              onClick={() => setShowManualInviteBox((v) => !v)}
-              className="text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer"
-            >
-              {showManualInviteBox
-                ? 'Ukryj pole linku'
-                : 'Wklej link zaproszeniowy'}
-            </button>
+          {/* Collapsible Step-by-Step Guide & Module Educational Explanation */}
+          <FirebaseSetupGuideDropdown />
+
+          {/* Option A: 1-Tap File Upload (.json) */}
+          <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-3">
+            <div className="text-xs font-semibold text-[var(--vault-text)]">
+              Opcja A (Najszybsza): Wybierz plik <code className="font-mono">.json</code> z pamięci urządzenia
+            </div>
+            <label className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer shadow-sm">
+              <Upload className="w-4 h-4 shrink-0" />
+              <span>Wybierz plik firebase-config.json z urządzenia</span>
+              <input
+                type="file"
+                accept=".json,application/json,text/plain"
+                onChange={handleFirebaseJsonFileSelect}
+                className="hidden"
+              />
+            </label>
           </div>
-          {showManualInviteBox && (
-            <form
-              onSubmit={handleApplyManualInvite}
-              className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1"
-            >
+
+          {/* Option B: Paste JSON or firebaseConfig snippet */}
+          <form onSubmit={handleFirebaseJsonSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
+                Opcja B: Wklej zawartość JSON lub obiekt <code className="font-mono">firebaseConfig</code> z Firebase Console
+              </label>
+              <textarea
+                rows={6}
+                value={rawFirebaseJsonInput}
+                onChange={(e) => setRawFirebaseJsonInput(e.target.value)}
+                placeholder={`{\n  "apiKey": "AIzaSy...",\n  "authDomain": "twoj-projekt.firebaseapp.com",\n  "projectId": "twoj-projekt",\n  "appId": "1:...",\n  "firestoreDatabaseId": "(default)"\n}`}
+                className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
+                Opcjonalne ID bazy Firestore (pozostaw puste jeśli jest w JSON lub używasz domyślnej bazy)
+              </label>
               <input
                 type="text"
-                value={manualInviteInput}
-                onChange={(e) => setManualInviteInput(e.target.value)}
-                placeholder="Wklej pełny link zaproszeniowy od Administratora..."
-                className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
+                value={customDatabaseIdInput}
+                onChange={(e) => setCustomDatabaseIdInput(e.target.value)}
+                placeholder="np. ai-studio-... lub zostaw puste dla (default)"
+                className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
               />
+            </div>
+
+            {firebaseConfigError && (
+              <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
+                {firebaseConfigError}
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="submit"
-                className="px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
+                className="flex-1 inline-flex items-center justify-center gap-2 px-5 py-3 text-xs sm:text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer"
               >
-                Otwórz zaproszenie
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>Załaduj konfigurację i uruchom jako Administrator</span>
               </button>
-            </form>
-          )}
+
+              {showChangeFirebaseConfigModal && firebaseReady && (
+                <button
+                  type="button"
+                  onClick={() => setShowChangeFirebaseConfigModal(false)}
+                  className="px-4 py-3 text-xs font-semibold text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded-xl cursor-pointer"
+                >
+                  Anuluj
+                </button>
+              )}
+            </div>
+          </form>
+
+          {/* Family Member Invite Link Paste Fallback */}
+          <div className="pt-4 border-t border-[var(--vault-border)] space-y-2.5 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
+              <span>
+                Jesteś domownikiem i otrzymałeś link zaproszeniowy od Administratora?
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowManualInviteBox((v) => !v)}
+                className="text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer"
+              >
+                {showManualInviteBox
+                  ? 'Ukryj pole linku'
+                  : 'Wklej link zaproszeniowy'}
+              </button>
+            </div>
+            {showManualInviteBox && (
+              <form
+                onSubmit={handleApplyManualInvite}
+                className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-1"
+              >
+                <input
+                  type="text"
+                  value={manualInviteInput}
+                  onChange={(e) => setManualInviteInput(e.target.value)}
+                  placeholder="Wklej pełny link zaproszeniowy od Administratora..."
+                  className="flex-1 px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)]"
+                />
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer shrink-0"
+                >
+                  Otwórz zaproszenie
+                </button>
+              </form>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -825,106 +879,110 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     };
 
     return (
-      <div className="max-w-lg mx-auto my-8 p-6 sm:p-8 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-6">
-        <div className="space-y-2">
-          <div className="text-xs font-medium text-[var(--vault-accent)]">
-            Dwuetapowa ochrona dostępu · Link Zaproszeniowy + Certyfikat Sprzętowy
-          </div>
-          <h2 className="text-xl font-bold font-display text-[var(--vault-text)]">
-            {existingDevice && isDevicePending
-              ? 'Oczekiwanie na akceptację konta przez Administratora lub Opiekuna'
-              : 'Rozpoznano Twoje konto — autoryzuj to urządzenie'}
-          </h2>
-          <p className="text-sm text-[var(--vault-muted)]">
-            Zgłoszono profil:{' '}
-            <strong className="text-[var(--vault-text)]">
-              {member.fullName} (login: {member.username})
-            </strong>
-            . Dostęp do skarbca otworzy się automatycznie w tej samej sekundzie (przez nasłuchiwanie czasu rzeczywistego <code>onSnapshot</code>), gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj”.
-          </p>
-        </div>
+      <div className="max-w-lg mx-auto my-4 space-y-6">
+        {renderTopPwaUpdateBar()}
 
-        <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2 text-xs">
-          <div className="flex items-center justify-between">
-            <span className="text-[var(--vault-muted)]">
-              Model i system operacyjny:
-            </span>
-            <span className="font-mono font-semibold text-[var(--vault-text)]">
-              {detectedDevice.hardwareModelOs} ({detectedDevice.deviceName})
-            </span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-[var(--vault-muted)]">
-              Sygnatura sprzętowa (do klucza prywatnego):
-            </span>
-            <span className="font-mono font-semibold text-[var(--vault-accent)]">
-              {detectedDevice.hardwareSignatureHash}
-            </span>
-          </div>
-        </div>
-
-        {!existingDevice || isDeviceRevoked ? (
-          <form onSubmit={handleRequestAuth} className="space-y-4">
-            <div>
-              <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
-                Nazwa pomocnicza tego urządzenia (widoczna dla Ciebie i Admina)
-              </label>
-              <input
-                type="text"
-                value={deviceCustomLabel}
-                onChange={(e) => setDeviceCustomLabel(e.target.value)}
-                placeholder="np. Telefon Mamy, Laptop w salonie"
-                maxLength={80}
-                className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
-              />
+        <div className="p-6 sm:p-8 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-6">
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-[var(--vault-accent)]">
+              Dwuetapowa ochrona dostępu · Link Zaproszeniowy + Certyfikat Sprzętowy
             </div>
-
-            {errorMsg && (
-              <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)]">
-                {errorMsg}
-              </div>
-            )}
-
-            <button
-              type="submit"
-              disabled={isFamilyLoading}
-              className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer"
-            >
-              <ShieldCheck className="w-4 h-4" />
-              <span>
-                {isFamilyLoading
-                  ? 'Wysyłanie prośby...'
-                  : 'Autoryzuj moje urządzenie'}
-              </span>
-            </button>
-          </form>
-        ) : (
-          <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-2">
-            <div className="flex items-center gap-2 text-sm font-semibold text-[var(--vault-text)]">
-              <Clock className="w-4 h-4 text-[var(--vault-accent)]" />
-              <span>
-                {isAccountPending
-                  ? 'Konto zostało utworzone i oczekuje na zatwierdzenie!'
-                  : 'Urządzenie oczekuje na zatwierdzenie!'}
-              </span>
-            </div>
-            <p className="text-xs text-[var(--vault-muted)]">
-              Gdy Administrator lub Zaufany Opiekun kliknie „Akceptuj”, skarbiec otworzy się automatycznie. Przy kolejnych wejściach będziesz widzieć już tylko ekran logowania.
+            <h2 className="text-xl font-bold font-display text-[var(--vault-text)]">
+              {existingDevice && isDevicePending
+                ? 'Oczekiwanie na akceptację konta przez Administratora lub Opiekuna'
+                : 'Rozpoznano Twoje konto — autoryzuj to urządzenie'}
+            </h2>
+            <p className="text-sm text-[var(--vault-muted)]">
+              Zgłoszono profil:{' '}
+              <strong className="text-[var(--vault-text)]">
+                {member.fullName} (login: {member.username})
+              </strong>
+              . Dostęp do skarbca otworzy się automatycznie w tej samej sekundzie (przez nasłuchiwanie czasu rzeczywistego <code>onSnapshot</code>), gdy tylko Administrator lub Zaufany Opiekun kliknie „Akceptuj”.
             </p>
           </div>
-        )}
 
-        <div className="pt-2 border-t border-[var(--vault-border)] flex justify-between items-center text-xs">
-          <button
-            type="button"
-            onClick={onCancelPendingState}
-            className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
-          >
-            Przejdź do ekranu logowania
-          </button>
-          <span className="text-[var(--vault-muted)]">
-            Cloud Firestore onSnapshot aktywny
-          </span>
+          <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2 text-xs">
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--vault-muted)]">
+                Model i system operacyjny:
+              </span>
+              <span className="font-mono font-semibold text-[var(--vault-text)]">
+                {detectedDevice.hardwareModelOs} ({detectedDevice.deviceName})
+              </span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-[var(--vault-muted)]">
+                Sygnatura sprzętowa (do klucza prywatnego):
+              </span>
+              <span className="font-mono font-semibold text-[var(--vault-accent)]">
+                {detectedDevice.hardwareSignatureHash}
+              </span>
+            </div>
+          </div>
+
+          {!existingDevice || isDeviceRevoked ? (
+            <form onSubmit={handleRequestAuth} className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
+                  Nazwa pomocnicza tego urządzenia (widoczna dla Ciebie i Admina)
+                </label>
+                <input
+                  type="text"
+                  value={deviceCustomLabel}
+                  onChange={(e) => setDeviceCustomLabel(e.target.value)}
+                  placeholder="np. Telefon Mamy, Laptop w salonie"
+                  maxLength={80}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+                />
+              </div>
+
+              {errorMsg && (
+                <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)]">
+                  {errorMsg}
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={isFamilyLoading}
+                className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer"
+              >
+                <ShieldCheck className="w-4 h-4" />
+                <span>
+                  {isFamilyLoading
+                    ? 'Wysyłanie prośby...'
+                    : 'Autoryzuj moje urządzenie'}
+                </span>
+              </button>
+            </form>
+          ) : (
+            <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-2">
+              <div className="flex items-center gap-2 text-sm font-semibold text-[var(--vault-text)]">
+                <Clock className="w-4 h-4 text-[var(--vault-accent)]" />
+                <span>
+                  {isAccountPending
+                    ? 'Konto zostało utworzone i oczekuje na zatwierdzenie!'
+                    : 'Urządzenie oczekuje na zatwierdzenie!'}
+                </span>
+              </div>
+              <p className="text-xs text-[var(--vault-muted)]">
+                Gdy Administrator lub Zaufany Opiekun kliknie „Akceptuj”, skarbiec otworzy się automatycznie. Przy kolejnych wejściach będziesz widzieć już tylko ekran logowania.
+              </p>
+            </div>
+          )}
+
+          <div className="pt-2 border-t border-[var(--vault-border)] flex justify-between items-center text-xs">
+            <button
+              type="button"
+              onClick={onCancelPendingState}
+              className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
+            >
+              Przejdź do ekranu logowania
+            </button>
+            <span className="text-[var(--vault-muted)]">
+              Cloud Firestore onSnapshot aktywny
+            </span>
+          </div>
         </div>
       </div>
     );
@@ -1099,52 +1157,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     <div className="max-w-lg mx-auto my-4 space-y-6">
       
       {/* MAIN PAGE QUICK ACTION BAR: PWA Status + Update */}
-      <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-surface)] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div className="space-y-0.5">
-          <div className="text-xs font-semibold text-[var(--vault-text)] flex items-center gap-1.5">
-            <Smartphone className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
-            <span>
-              {isRunningInInstalledPwa
-                ? 'Aplikacja FamilyStream Vault działa w trybie zainstalowanym (PWA)'
-                : 'Zainstaluj skarbiec jako aplikację PWA'}
-            </span>
-          </div>
-          <p className="text-[11px] text-[var(--vault-muted)]">
-            {isRunningInInstalledPwa
-              ? 'Kliknij „Aktualizuj aplikację”, aby pobrać najnowszą wersję kodu z GitHub Pages bez utraty danych w Cloud Firestore.'
-              : 'Zainstaluj jako aplikację PWA na telefonie lub zaktualizuj program jednym kliknięciem.'}
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2 shrink-0">
-          {!isRunningInInstalledPwa && (
-            <button
-              type="button"
-              onClick={onInstallPWA}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors cursor-pointer"
-            >
-              <Download className="w-3.5 h-3.5 shrink-0" />
-              <span>Zainstaluj jako aplikację (PWA)</span>
-            </button>
-          )}
-
-          <button
-            type="button"
-            onClick={() => onTriggerAppUpdate()}
-            disabled={isUpdatingApp}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-bg)] hover:bg-[var(--vault-surface-hover)] rounded-lg transition-colors cursor-pointer"
-          >
-            <RefreshCw
-              className={`w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0 ${
-                isUpdatingApp ? 'animate-spin' : ''
-              }`}
-            />
-            <span>
-              {isUpdatingApp ? 'Aktualizowanie...' : 'Aktualizuj aplikację'}
-            </span>
-          </button>
-        </div>
-      </div>
+      {renderTopPwaUpdateBar()}
 
       {/* =====================================================================
           MODE 1: FAMILY MEMBER FIRST-TIME INVITATION ("TYLKO UTWÓRZ KONTO")
