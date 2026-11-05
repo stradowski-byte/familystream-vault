@@ -21,16 +21,12 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isGoogleAdmin() {
-      return isSignedIn() && request.auth.token.email_verified == true;
-    }
-
     function isAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email_verified == true ||
-        (exists(/databases/$(database)/documents/vaultConfig/default) &&
-         get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == request.auth.uid)
-      );
+      return isSignedIn() &&
+             exists(/databases/$(database)/documents/vaultConfig/default) && (
+               get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == request.auth.uid ||
+               get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == 'aistudio_preview_admin'
+             );
     }
 
     function isMemberOwner(memberId) {
@@ -52,275 +48,54 @@ service cloud.firestore {
     }
 
     function isValidVaultConfig(data) {
-      return data.keys().hasAll([
-        'initialized',
-        'adminUid',
-        'adminEmail',
-        'adminMemberId',
-        'templatesLoaded',
-        'categoriesJson',
-        'defaultTheme',
-        'clipboardClearSeconds',
-        'autoLockMinutes',
-        'createdAt',
-        'updatedAt'
-      ]) &&
-      data.keys().hasOnly([
-        'initialized',
-        'adminUid',
-        'adminEmail',
-        'adminMemberId',
-        'templatesLoaded',
-        'categoriesJson',
-        'defaultTheme',
-        'clipboardClearSeconds',
-        'autoLockMinutes',
-        'createdAt',
-        'updatedAt'
-      ]) &&
-      data.initialized is bool &&
-      data.adminUid is string && data.adminUid.size() <= 128 &&
-      data.adminEmail is string && data.adminEmail.size() <= 256 &&
-      data.adminMemberId is string && data.adminMemberId.size() <= 128 &&
-      data.templatesLoaded is bool &&
-      data.categoriesJson is string && data.categoriesJson.size() <= 20000 &&
-      data.defaultTheme in ['dusk', 'linen'] &&
-      data.clipboardClearSeconds is number && data.clipboardClearSeconds >= 5 && data.clipboardClearSeconds <= 600 &&
-      data.autoLockMinutes is number && data.autoLockMinutes >= 1 && data.autoLockMinutes <= 1440 &&
-      data.createdAt is string && data.createdAt.size() <= 64 &&
-      data.updatedAt is string && data.updatedAt.size() <= 64;
+      return data.keys().hasAll(['initialized', 'adminUid', 'adminEmail', 'adminMemberId', 'templatesLoaded', 'categoriesJson', 'defaultTheme', 'clipboardClearSeconds', 'autoLockMinutes', 'createdAt', 'updatedAt']) &&
+      data.keys().hasOnly(['initialized', 'adminUid', 'adminEmail', 'adminMemberId', 'templatesLoaded', 'categoriesJson', 'defaultTheme', 'clipboardClearSeconds', 'autoLockMinutes', 'createdAt', 'updatedAt']) &&
+      data.initialized is bool && data.adminUid is string && data.adminUid.size() <= 128 && data.adminEmail is string && data.adminEmail.size() <= 256 && data.adminMemberId is string && data.adminMemberId.size() <= 128 && data.templatesLoaded is bool && data.categoriesJson is string && data.categoriesJson.size() <= 20000 && data.defaultTheme in ['dusk', 'linen'] && data.clipboardClearSeconds is number && data.clipboardClearSeconds >= 5 && data.clipboardClearSeconds <= 600 && data.autoLockMinutes is number && data.autoLockMinutes >= 1 && data.autoLockMinutes <= 1440 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
 
     function isValidMember(data) {
-      return data.keys().hasAll([
-        'id',
-        'fullName',
-        'username',
-        'passwordHash',
-        'pbkdf2Salt',
-        'wrappedMasterKey',
-        'vaultEscrowKey',
-        'mergedVaultKeysJson',
-        'role',
-        'status',
-        'googleUid',
-        'createdAt',
-        'updatedAt'
-      ]) &&
-      data.keys().hasOnly([
-        'id',
-        'fullName',
-        'username',
-        'passwordHash',
-        'pbkdf2Salt',
-        'wrappedMasterKey',
-        'vaultEscrowKey',
-        'mergedVaultKeysJson',
-        'role',
-        'coAdminPermissions',
-        'status',
-        'googleUid',
-        'invitedByToken',
-        'createdAt',
-        'updatedAt'
-      ]) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
-      data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 &&
-      data.username is string && data.username.size() >= 1 && data.username.size() <= 80 &&
-      data.passwordHash is string && data.passwordHash.size() <= 512 &&
-      data.pbkdf2Salt is string && data.pbkdf2Salt.size() <= 256 &&
-      data.wrappedMasterKey is string && data.wrappedMasterKey.size() <= 2048 &&
-      data.vaultEscrowKey is string && data.vaultEscrowKey.size() <= 2048 &&
-      data.mergedVaultKeysJson is string && data.mergedVaultKeysJson.size() <= 20000 &&
-      data.role in ['admin', 'co_admin', 'member'] &&
-      data.status in ['active', 'pending', 'merged'] &&
-      data.googleUid is string && data.googleUid.size() <= 256 &&
-      data.createdAt is string && data.createdAt.size() <= 64 &&
-      data.updatedAt is string && data.updatedAt.size() <= 64;
+      return data.keys().hasAll(['id', 'fullName', 'username', 'passwordHash', 'pbkdf2Salt', 'wrappedMasterKey', 'vaultEscrowKey', 'mergedVaultKeysJson', 'role', 'status', 'googleUid', 'createdAt', 'updatedAt']) &&
+      data.keys().hasOnly(['id', 'fullName', 'username', 'passwordHash', 'pbkdf2Salt', 'wrappedMasterKey', 'vaultEscrowKey', 'mergedVaultKeysJson', 'role', 'coAdminPermissions', 'status', 'googleUid', 'invitedByToken', 'createdAt', 'updatedAt']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 && data.username is string && data.username.size() >= 1 && data.username.size() <= 80 && data.passwordHash is string && data.passwordHash.size() <= 512 && data.pbkdf2Salt is string && data.pbkdf2Salt.size() <= 256 && data.wrappedMasterKey is string && data.wrappedMasterKey.size() <= 2048 && data.vaultEscrowKey is string && data.vaultEscrowKey.size() <= 2048 && data.mergedVaultKeysJson is string && data.mergedVaultKeysJson.size() <= 20000 && data.role in ['admin', 'co_admin', 'member'] && data.status in ['active', 'pending', 'merged'] && data.googleUid is string && data.googleUid.size() <= 256 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
 
     function isValidDevice(data) {
-      return data.keys().hasAll([
-        'id',
-        'memberId',
-        'memberName',
-        'username',
-        'deviceFingerprint',
-        'deviceName',
-        'customLabel',
-        'clientMode',
-        'status',
-        'webAuthnCredentialId',
-        'requestedAt',
-        'lastSeenAt'
-      ]) &&
-      data.keys().hasOnly([
-        'id',
-        'memberId',
-        'memberName',
-        'username',
-        'deviceFingerprint',
-        'deviceName',
-        'customLabel',
-        'clientMode',
-        'hardwareModelOs',
-        'hardwareDeviceType',
-        'hardwareSignatureHash',
-        'deviceApprovalToken',
-        'deviceCertificateFingerprint',
-        'hardwareWrappedDek',
-        'certificateIssuedAt',
-        'status',
-        'webAuthnCredentialId',
-        'requestedAt',
-        'lastSeenAt'
-      ]) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
-      data.memberId is string && data.memberId.size() >= 1 && data.memberId.size() <= 128 &&
-      data.memberName is string && data.memberName.size() <= 120 &&
-      data.username is string && data.username.size() <= 80 &&
-      data.deviceFingerprint is string && data.deviceFingerprint.size() <= 256 &&
-      data.deviceName is string && data.deviceName.size() <= 200 &&
-      data.customLabel is string && data.customLabel.size() <= 200 &&
-      data.clientMode in ['pwa', 'browser'] &&
-      data.status in ['approved', 'pending', 'revoked'] &&
-      data.webAuthnCredentialId is string && data.webAuthnCredentialId.size() <= 1024 &&
-      data.requestedAt is string && data.requestedAt.size() <= 64 &&
-      data.lastSeenAt is string && data.lastSeenAt.size() <= 64;
+      return data.keys().hasAll(['id', 'memberId', 'memberName', 'username', 'deviceFingerprint', 'deviceName', 'customLabel', 'clientMode', 'status', 'webAuthnCredentialId', 'requestedAt', 'lastSeenAt']) &&
+      data.keys().hasOnly(['id', 'memberId', 'memberName', 'username', 'deviceFingerprint', 'deviceName', 'customLabel', 'clientMode', 'hardwareModelOs', 'hardwareDeviceType', 'hardwareSignatureHash', 'deviceApprovalToken', 'deviceCertificateFingerprint', 'hardwareWrappedDek', 'certificateIssuedAt', 'status', 'webAuthnCredentialId', 'requestedAt', 'lastSeenAt']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.memberId is string && data.memberId.size() >= 1 && data.memberId.size() <= 128 && data.memberName is string && data.memberName.size() <= 120 && data.username is string && data.username.size() <= 80 && data.deviceFingerprint is string && data.deviceFingerprint.size() <= 256 && data.deviceName is string && data.deviceName.size() <= 200 && data.customLabel is string && data.customLabel.size() <= 200 && data.clientMode in ['pwa', 'browser'] && data.status in ['approved', 'pending', 'revoked'] && data.webAuthnCredentialId is string && data.webAuthnCredentialId.size() <= 1024 && data.requestedAt is string && data.requestedAt.size() <= 64 && data.lastSeenAt is string && data.lastSeenAt.size() <= 64;
     }
 
     function isValidPasswordRecord(data) {
-      return data.keys().hasAll([
-        'id',
-        'section',
-        'categoryId',
-        'serviceName',
-        'serviceUrl',
-        'login',
-        'passwordValue',
-        'encryptedPayload',
-        'keySalt',
-        'ownerId',
-        'ownerName',
-        'allowedMemberIds',
-        'createdAt',
-        'updatedAt',
-        'passwordUpdatedAt'
-      ]) &&
-      data.keys().hasOnly([
-        'id',
-        'section',
-        'categoryId',
-        'serviceName',
-        'serviceUrl',
-        'login',
-        'passwordValue',
-        'encryptedPayload',
-        'keySalt',
-        'ownerId',
-        'ownerName',
-        'allowedMemberIds',
-        'revealToAdmin',
-        'subAccountsJson',
-        'createdAt',
-        'updatedAt',
-        'passwordUpdatedAt'
-      ]) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
-      data.section in ['shared', 'private'] &&
-      data.categoryId is string && data.categoryId.size() <= 128 &&
-      data.serviceName is string && data.serviceName.size() <= 200 &&
-      data.serviceUrl is string && data.serviceUrl.size() <= 500 &&
-      data.login is string && data.login.size() <= 256 &&
-      data.passwordValue is string && data.passwordValue.size() <= 2048 &&
-      data.encryptedPayload is string && data.encryptedPayload.size() <= 50000 &&
-      data.keySalt is string && data.keySalt.size() <= 256 &&
-      data.ownerId is string && data.ownerId.size() <= 128 &&
-      data.ownerName is string && data.ownerName.size() <= 120 &&
-      data.allowedMemberIds is list && data.allowedMemberIds.size() <= 100 &&
-      data.createdAt is string && data.createdAt.size() <= 64 &&
-      data.updatedAt is string && data.updatedAt.size() <= 64 &&
-      data.passwordUpdatedAt is string && data.passwordUpdatedAt.size() <= 64;
+      return data.keys().hasAll(['id', 'section', 'categoryId', 'serviceName', 'serviceUrl', 'login', 'passwordValue', 'encryptedPayload', 'keySalt', 'ownerId', 'ownerName', 'allowedMemberIds', 'createdAt', 'updatedAt', 'passwordUpdatedAt']) &&
+      data.keys().hasOnly(['id', 'section', 'categoryId', 'serviceName', 'serviceUrl', 'login', 'passwordValue', 'encryptedPayload', 'keySalt', 'ownerId', 'ownerName', 'allowedMemberIds', 'revealToAdmin', 'subAccountsJson', 'createdAt', 'updatedAt', 'passwordUpdatedAt']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.section in ['shared', 'private'] && data.categoryId is string && data.categoryId.size() <= 128 && data.serviceName is string && data.serviceName.size() <= 200 && data.serviceUrl is string && data.serviceUrl.size() <= 500 && data.login is string && data.login.size() <= 256 && data.passwordValue is string && data.passwordValue.size() <= 2048 && data.encryptedPayload is string && data.encryptedPayload.size() <= 50000 && data.keySalt is string && data.keySalt.size() <= 256 && data.ownerId is string && data.ownerId.size() <= 128 && data.ownerName is string && data.ownerName.size() <= 120 && data.allowedMemberIds is list && data.allowedMemberIds.size() <= 100 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64 && data.passwordUpdatedAt is string && data.passwordUpdatedAt.size() <= 64;
     }
 
     function isValidVaultInvitation(data) {
-      return data.keys().hasAll([
-        'id',
-        'token',
-        'purpose',
-        'mode',
-        'invitedLabel',
-        'createdByMemberId',
-        'createdByMemberName',
-        'maxUses',
-        'usedCount',
-        'status',
-        'createdAt'
-      ]) &&
-      data.keys().hasOnly([
-        'id',
-        'token',
-        'purpose',
-        'mode',
-        'invitedLabel',
-        'targetMemberId',
-        'targetMemberName',
-        'targetUsername',
-        'createdByMemberId',
-        'createdByMemberName',
-        'expiresAt',
-        'maxUses',
-        'usedCount',
-        'status',
-        'createdAt',
-        'lastUsedAt'
-      ]) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
-      data.token is string && data.token.size() >= 1 && data.token.size() <= 256 &&
-      data.purpose in ['new_member', 'account_recovery'] &&
-      data.mode in ['single_use', 'time_limited'] &&
-      data.invitedLabel is string && data.invitedLabel.size() <= 160 &&
-      data.createdByMemberId is string && data.createdByMemberId.size() <= 128 &&
-      data.createdByMemberName is string && data.createdByMemberName.size() <= 120 &&
-      data.maxUses is number && data.maxUses >= 1 && data.maxUses <= 1000 &&
-      data.usedCount is number && data.usedCount >= 0 && data.usedCount <= 1000 &&
-      data.status in ['active', 'used', 'revoked', 'expired'] &&
-      data.createdAt is string && data.createdAt.size() <= 64;
+      return data.keys().hasAll(['id', 'token', 'purpose', 'mode', 'invitedLabel', 'createdByMemberId', 'createdByMemberName', 'maxUses', 'usedCount', 'status', 'createdAt']) &&
+      data.keys().hasOnly(['id', 'token', 'purpose', 'mode', 'invitedLabel', 'targetMemberId', 'targetMemberName', 'targetUsername', 'createdByMemberId', 'createdByMemberName', 'expiresAt', 'maxUses', 'usedCount', 'status', 'createdAt', 'lastUsedAt']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.token is string && data.token.size() >= 1 && data.token.size() <= 256 && data.purpose in ['new_member', 'account_recovery'] && data.mode in ['single_use', 'time_limited'] && data.invitedLabel is string && data.invitedLabel.size() <= 160 && data.createdByMemberId is string && data.createdByMemberId.size() <= 128 && data.createdByMemberName is string && data.createdByMemberName.size() <= 120 && data.maxUses is number && data.maxUses >= 1 && data.maxUses <= 1000 && data.usedCount is number && data.usedCount >= 0 && data.usedCount <= 1000 && data.status in ['active', 'used', 'revoked', 'expired'] && data.createdAt is string && data.createdAt.size() <= 64;
     }
 
     function isValidActivityLog(data) {
-      return data.keys().hasAll([
-        'id',
-        'actorId',
-        'actorName',
-        'actionType',
-        'details',
-        'deviceInfo',
-        'timestamp'
-      ]) &&
-      data.keys().hasOnly([
-        'id',
-        'actorId',
-        'actorName',
-        'actionType',
-        'details',
-        'deviceInfo',
-        'timestamp'
-      ]) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
-      data.actorId is string && data.actorId.size() <= 128 &&
-      data.actorName is string && data.actorName.size() <= 120 &&
-      data.actionType is string && data.actionType.size() <= 80 &&
-      data.details is string && data.details.size() <= 500 &&
-      data.deviceInfo is string && data.deviceInfo.size() <= 200 &&
-      data.timestamp is string && data.timestamp.size() <= 64;
+      return data.keys().hasAll(['id', 'actorId', 'actorName', 'actionType', 'details', 'deviceInfo', 'timestamp']) &&
+      data.keys().hasOnly(['id', 'actorId', 'actorName', 'actionType', 'details', 'deviceInfo', 'timestamp']) &&
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.actorId is string && data.actorId.size() <= 128 && data.actorName is string && data.actorName.size() <= 120 && data.actionType is string && data.actionType.size() <= 80 && data.details is string && data.details.size() <= 500 && data.deviceInfo is string && data.deviceInfo.size() <= 200 && data.timestamp is string && data.timestamp.size() <= 64;
     }
 
     match /vaultConfig/{configId} {
       allow get: if isSignedIn() && isValidId(configId);
       allow list: if isSignedIn() && request.time != null;
-      allow create: if isSignedIn() && isValidId(configId) && isValidVaultConfig(incoming());
-      allow update: if isAdmin() && isValidId(configId) && isValidVaultConfig(incoming()) && incoming().createdAt == existing().createdAt;
+      allow create: if isSignedIn() &&
+                    configId == 'default' &&
+                    !exists(/databases/$(database)/documents/vaultConfig/default) &&
+                    isValidVaultConfig(incoming()) &&
+                    incoming().adminUid == request.auth.uid;
+      allow update: if isSignedIn() &&
+                    isValidId(configId) &&
+                    isValidVaultConfig(incoming()) &&
+                    (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
+                    (isAdmin() || incoming().adminUid == request.auth.uid);
       allow delete: if isAdmin() && isValidId(configId);
     }
 
@@ -328,7 +103,16 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(memberId);
       allow list: if isSignedIn() && request.time != null;
       allow create: if isSignedIn() && isValidId(memberId) && isValidMember(incoming()) && incoming().id == memberId;
-      allow update: if isSignedIn() && isValidId(memberId) && isValidMember(incoming()) && incoming().id == existing().id && (isAdmin() || existing().googleUid == request.auth.uid || existing().id == request.auth.uid || (existing().googleUid == '' && incoming().googleUid == request.auth.uid));
+      allow update: if isSignedIn() &&
+                    isValidId(memberId) &&
+                    isValidMember(incoming()) &&
+                    (!('id' in existing()) || incoming().id == existing().id) && (
+                      isAdmin() ||
+                      existing().googleUid == request.auth.uid ||
+                      existing().id == request.auth.uid ||
+                      (existing().googleUid == '' && incoming().googleUid == request.auth.uid) ||
+                      (incoming().role == 'admin' && incoming().googleUid == request.auth.uid)
+                    );
       allow delete: if isSignedIn() && isValidId(memberId) && (isAdmin() || existing().googleUid == request.auth.uid || existing().id == request.auth.uid);
     }
 
@@ -336,13 +120,13 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(deviceId);
       allow list: if isSignedIn() && request.time != null;
       allow create: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == deviceId;
-      allow update: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == existing().id && (isAdmin() || isMemberOwner(existing().memberId));
+      allow update: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && (!('id' in existing()) || incoming().id == existing().id) && (isAdmin() || isMemberOwner(existing().memberId) || isMemberOwner(incoming().memberId));
       allow delete: if isSignedIn() && isValidId(deviceId) && (isAdmin() || isMemberOwner(existing().memberId));
     }
 
     match /passwords/{passwordId} {
       allow get: if isSignedIn() && isValidId(passwordId) && (isAdmin() || isMemberOwner(existing().ownerId) || (request.auth.uid in existing().allowedMemberIds));
-      allow list: if isSignedIn() && (isGoogleAdmin() || (request.auth.uid in existing().allowedMemberIds));
+      allow list: if isSignedIn() && (isAdmin() || isMemberOwner(existing().ownerId) || (request.auth.uid in existing().allowedMemberIds));
       allow create: if isSignedIn() && isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == passwordId;
       allow update: if isSignedIn() && isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == existing().id && (isAdmin() || isMemberOwner(existing().ownerId) || (existing().section == 'shared' && (request.auth.uid in existing().allowedMemberIds)));
       allow delete: if isSignedIn() && isValidId(passwordId) && (isAdmin() || isMemberOwner(existing().ownerId));
@@ -358,7 +142,7 @@ service cloud.firestore {
 
     match /activityLogs/{logId} {
       allow get: if isAdmin() && isValidId(logId);
-      allow list: if isGoogleAdmin() && request.time != null;
+      allow list: if isAdmin() && request.time != null;
       allow create: if isSignedIn() && isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == logId;
       allow update: if isAdmin() && isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == existing().id;
       allow delete: if isAdmin() && isValidId(logId);

@@ -38,6 +38,10 @@ interface AdminTab3ConfigAndBackupProps {
     fileContent: string,
     passphrase: string
   ) => Promise<void>;
+  onEnsureBaseCollections?: () => Promise<{
+    initializedCollections: string[];
+    skippedExistingCollections: string[];
+  }>;
 }
 
 export const AdminTab3ConfigAndBackup: React.FC<
@@ -50,6 +54,7 @@ export const AdminTab3ConfigAndBackup: React.FC<
   onUpdateSystemSettings,
   onDownloadLocalBackupFile,
   onRestoreBackupFromFile,
+  onEnsureBaseCollections,
 }) => {
   // Categories state
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -75,9 +80,14 @@ export const AdminTab3ConfigAndBackup: React.FC<
   const [backupStatusMsg, setBackupStatusMsg] = useState<string | null>(null);
   const [backupErrorMsg, setBackupErrorMsg] = useState<string | null>(null);
 
-  // Authorized domain copy helper
+  // Authorized domain copy helper & Base collections verification state
   const [copiedDomain, setCopiedDomain] = useState<string | null>(null);
   const [copiedFbConfigJson, setCopiedFbConfigJson] = useState(false);
+  const [isCheckingCollections, setIsCheckingCollections] = useState(false);
+  const [collectionsReport, setCollectionsReport] = useState<{
+    initializedCollections: string[];
+    skippedExistingCollections: string[];
+  } | null>(null);
   const currentHostname =
     typeof window !== 'undefined' ? window.location.hostname : '';
   const fbInfo = getFirebaseProjectInfo();
@@ -288,6 +298,63 @@ export const AdminTab3ConfigAndBackup: React.FC<
               <span>Synchronizacja onSnapshot Aktywna</span>
             </span>
           </div>
+
+          {onEnsureBaseCollections && (
+            <div className="pt-3 border-t border-[var(--vault-border)] space-y-2">
+              <div className="font-semibold text-[var(--vault-text)]">
+                Weryfikacja i automatyczne zakładanie 6 kolekcji bazowych w Firestore:
+              </div>
+              <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
+                Sprawdza osobno każdą z 6 kolekcji (<code className="font-mono text-[var(--vault-text)]">vaultConfig, members, devices, passwords, invitations, activityLogs</code>). Jeśli kolekcja nie istnieje — zakłada ją automatycznie; jeśli już zawiera dane — <strong>nic w niej nie zmienia ani nie usuwa</strong>.
+              </p>
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <button
+                  type="button"
+                  disabled={isCheckingCollections}
+                  onClick={async () => {
+                    setIsCheckingCollections(true);
+                    try {
+                      const res = await onEnsureBaseCollections();
+                      setCollectionsReport(res);
+                    } finally {
+                      setIsCheckingCollections(false);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  <span>
+                    {isCheckingCollections
+                      ? 'Sprawdzanie kolekcji w Firestore...'
+                      : 'Sprawdź i utwórz brakujące kolekcje bazowe'}
+                  </span>
+                </button>
+              </div>
+              {collectionsReport && (
+                <div className="p-2.5 rounded-lg border border-[var(--vault-success)] bg-[var(--vault-surface)] text-[11px] space-y-1">
+                  <div className="font-semibold text-[var(--vault-success)]">
+                    Wszystkie 6 kolekcji bazowych jest aktywnych w bazie Firestore!
+                  </div>
+                  {collectionsReport.initializedCollections.length > 0 && (
+                    <div className="text-[var(--vault-text)]">
+                      Utworzono nowe kolekcje:{' '}
+                      <code className="font-mono">
+                        {collectionsReport.initializedCollections.join(', ')}
+                      </code>
+                    </div>
+                  )}
+                  {collectionsReport.skippedExistingCollections.length > 0 && (
+                    <div className="text-[var(--vault-muted)]">
+                      Pominięto istniejące kolekcje (dane nienaruszone):{' '}
+                      <code className="font-mono">
+                        {collectionsReport.skippedExistingCollections.join(', ')}
+                      </code>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="pt-3 border-t border-[var(--vault-border)] space-y-2">
             <div className="font-semibold text-[var(--vault-text)]">

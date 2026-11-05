@@ -295,6 +295,10 @@ export function clearCustomFirebaseConfig(): void {
   try {
     localStorage.removeItem(LOCAL_FIREBASE_CONFIG_KEY);
     localStorage.removeItem(DEVICE_INSTANCE_ROLE_KEY);
+    const fallback = getActiveFirebaseConfig();
+    if (fallback) {
+      initializeOrUpdateFirebaseInstances(fallback);
+    }
   } catch {
     // ignore
   }

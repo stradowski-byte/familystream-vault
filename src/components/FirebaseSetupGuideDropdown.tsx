@@ -9,6 +9,7 @@ import {
   KeyRound,
   Cpu,
   FileJson,
+  CheckCircle2,
 } from 'lucide-react';
 
 interface FirebaseSetupGuideDropdownProps {
@@ -31,10 +32,10 @@ export const FirebaseSetupGuideDropdown: React.FC<
           <BookOpen className="w-4 h-4 text-[var(--vault-accent)] shrink-0" />
           <div className="min-w-0">
             <div className="text-xs font-bold text-[var(--vault-text)] leading-snug">
-              Jak utworzyć własny plik JSON w Firebase i po co są poszczególne moduły?
+              Aktualna instrukcja Firebase Console (Nowe UI) i automatyczne zakładanie kolekcji
             </div>
             <div className="text-[11px] text-[var(--vault-muted)] truncate">
-              Kliknij, aby rozwinąć instrukcję krok po kroku (5 kroków) oraz przewodnik edukacyjny po architekturze
+              Kliknij, aby rozwinąć przewodnik krok po kroku po nowym interfejsie Firebase (Authentication with Identity Platform + Firestore)
             </div>
           </div>
         </div>
@@ -50,13 +51,26 @@ export const FirebaseSetupGuideDropdown: React.FC<
 
       {isOpen && (
         <div className="p-4 sm:p-5 border-t border-[var(--vault-border)] space-y-6 text-xs leading-relaxed">
-          {/* PART 1: STEP BY STEP GUIDE */}
+          {/* AUTOMATIC 6-COLLECTION BOOTSTRAPPER BANNER */}
+          <div className="p-3.5 rounded-xl border border-[var(--vault-success)] bg-[var(--vault-surface)] flex items-start gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-[var(--vault-success)] shrink-0 mt-0.5" />
+            <div className="space-y-1 text-[11px]">
+              <div className="font-bold text-[var(--vault-text)]">
+                Automatyczne zakładanie 6 kolekcji bazowych (Zero ręcznego klikania „Start collection”)
+              </div>
+              <p className="text-[var(--vault-muted)]">
+                W nowym projekcie Firebase <strong>nie musisz ręcznie tworzyć żadnych kolekcji</strong>. Przy pierwszym logowaniu Administratora aplikacja sama sprawdza każdą z 6 kolekcji (<code>vaultConfig</code>, <code>members</code>, <code>devices</code>, <code>passwords</code>, <code>invitations</code>, <code>activityLogs</code>): jeśli kolekcja nie istnieje — zakłada ją automatycznie; jeśli już istnieje i ma dane — <strong>niczego nie nadpisuje ani nie usuwa</strong>.
+              </p>
+            </div>
+          </div>
+
+          {/* PART 1: STEP BY STEP GUIDE FOR NEW FIREBASE CONSOLE UI */}
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-xs sm:text-sm font-bold text-[var(--vault-text)] flex items-center gap-1.5">
                 <FileJson className="w-4 h-4 text-[var(--vault-accent)] shrink-0" />
                 <span>
-                  Część 1. Jak wygenerować własny plik konfiguracyjny JSON (Krok po kroku)
+                  Część 1. Konfiguracja własnego projektu w nowym UI Firebase Console (5 kroków)
                 </span>
               </h3>
               <a
@@ -70,60 +84,90 @@ export const FirebaseSetupGuideDropdown: React.FC<
               </a>
             </div>
 
-            <ol className="space-y-2.5 text-[var(--vault-muted)] list-decimal list-inside">
+            <ol className="space-y-3 text-[var(--vault-muted)] list-decimal list-inside">
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Utwórz darmowy projekt w Firebase Console:
+                  Utwórz projekt w Firebase Console:
                 </strong>{' '}
                 Wejdź na <code>console.firebase.google.com</code>, kliknij{' '}
-                <strong>Create a project</strong> (lub <strong>Add project</strong>), nadaj mu dowolną nazwę (np.{' '}
-                <code>moj-rodzinny-skarbiec</code>) i utwórz projekt na bezpłatnym planie <strong>Spark</strong> (Google Analytics możesz wyłączyć).
+                <strong>Create a Firebase project</strong> (lub <strong>Add project</strong>), wpisz nazwę projektu (np.{' '}
+                <code>moj-rodzinny-skarbiec</code>), wyłącz opcjonalne Google Analytics i kliknij{' '}
+                <strong>Create project</strong>.
               </li>
+
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Zarejestruj aplikację Web (ikona <code>&lt;/&gt;</code>) i skopiuj JSON:
+                  Pobierz obiekt <code>firebaseConfig</code> (Koło zębate → Project settings → Your apps):
                 </strong>{' '}
-                Na ekranie głównym nowego projektu kliknij okrągłą ikonę{' '}
-                <strong>Web (<code>&lt;/&gt;</code>)</strong>, wpisz nazwę (np.{' '}
+                W lewym wąskim pasku nawigacji kliknij ikonę{' '}
+                <strong>koła zębatego (⚙) → Project settings</strong>. W zakładce{' '}
+                <strong>General</strong> przewiń na sam dół do sekcji{' '}
+                <strong>Your apps</strong> i kliknij okrągłą ikonę{' '}
+                <strong>Web (<code>&lt;/&gt;</code>)</strong>. Wpisz nazwę (np.{' '}
                 <code>FamilyStream Vault PWA</code>) i kliknij{' '}
-                <strong>Register app</strong>. Zobaczysz obiekt{' '}
-                <code>const firebaseConfig = &#123; ... &#125;;</code> — skopiuj sam blok <code>&#123; ... &#125;</code> i wklej go w formularzu lub zapisz na urządzeniu jako plik{' '}
+                <strong>Register app</strong>. Skopiuj sam obiekt{' '}
+                <code>&#123; apiKey: &quot;...&quot;, ... &#125;</code> i wklej go w formularzu lub zapisz jako plik{' '}
                 <code>firebase-config.json</code>.
               </li>
+
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Włącz logowanie Google + Anonymous oraz autoryzuj domenę GitHub Pages:
+                  Włącz Google oraz Anonymous w „Authentication with Identity Platform”:
                 </strong>{' '}
-                W menu po lewej stronie wybierz{' '}
-                <strong>Build → Authentication → Get started</strong>. W zakładce{' '}
-                <strong>Sign-in method</strong> włącz dwie metody:
-                <ul className="list-disc list-inside pl-3 mt-1 space-y-1">
+                W lewym pasku nawigacji wybierz ikonę dwóch osób (<strong>Authentication</strong>) i kliknij{' '}
+                <strong>Get started</strong>. Na górnym poziomym pasku zakładek (<code>Users | Sign-in method | Templates | Usage | Settings</code>) przejdź do{' '}
+                <strong>Sign-in method</strong>:
+                <ul className="list-disc list-inside pl-3 mt-1.5 space-y-1">
                   <li>
-                    <strong>Google</strong> (dla Głównego Administratora) — przełącz na <strong>Enable</strong>, wybierz adres e-mail wsparcia i kliknij <strong>Save</strong>.
+                    W tabeli <strong>Sign-in providers</strong> kliknij niebieski przycisk{' '}
+                    <strong>Add new provider</strong> (w prawym górnym rogu tabeli).
                   </li>
                   <li>
-                    <strong>Anonymous</strong> (dla urządzeń Domowników powiązanych z Certyfikatem Sprzętowym, aby reguły <code>firestore.rules</code> mogły wymagać <code>request.auth != null</code> bez zmuszania rodziny do logowania przez Google) — kliknij <strong>Add new provider → Anonymous → Enable → Save</strong>.
+                    Wybierz <strong>Google</strong> → przełącz suwak <strong>Enable</strong> → wybierz swój e-mail w polu <em>Project support email</em> → kliknij <strong>Save</strong> (status w tabeli zmieni się na zielone <strong>Enabled</strong>).
+                  </li>
+                  <li>
+                    Ponownie kliknij niebieski przycisk <strong>Add new provider</strong> → wybierz{' '}
+                    <strong>Anonymous</strong> → przełącz suwak <strong>Enable</strong> → kliknij{' '}
+                    <strong>Save</strong> (w tabeli zobaczysz oba wiersze: <strong>Google — Enabled</strong> oraz <strong>Anonymous — Enabled</strong>).
                   </li>
                 </ul>
-                Następnie wejdź w zakładkę{' '}
-                <strong>Settings → Authorized domains → Add domain</strong> i dodaj domenę swojego GitHub Pages (np.{' '}
-                <code>twoj-login.github.io</code>).
               </li>
+
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Utwórz bazę danych Cloud Firestore:
+                  Dodaj domenę w zakładce „Settings → Authorized domains”:
                 </strong>{' '}
-                W menu po lewej wybierz{' '}
-                <strong>Build → Firestore Database → Create database</strong>. Wybierz lokalizację serwera blisko siebie (np.{' '}
-                <code>eur3</code> lub <code>europe-west3</code> — Frankfurt) i utwórz bazę.
+                Pozostając w widoku <strong>Authentication</strong>, na górnym poziomym pasku zakładek kliknij{' '}
+                <strong>Settings</strong> (obok <em>Usage</em>), wybierz sekcję{' '}
+                <strong>Authorized domains</strong>, kliknij przycisk{' '}
+                <strong>Add domain</strong> i wpisz domenę swojego GitHub Pages (np.{' '}
+                <code>stradowski-byte.github.io</code>).
               </li>
+
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Wklej reguły bezpieczeństwa (<code>firestore.rules</code>):
+                  Utwórz bazę w „Firestore Database” i opublikuj zakładkę „Rules”:
                 </strong>{' '}
-                W widoku bazy Firestore przejdź do zakładki{' '}
-                <strong>Rules</strong>, wklej pancerne reguły z pliku{' '}
-                <code>firestore.rules</code> (wymagające jednocześnie <code>request.auth != null</code>, weryfikacji właściciela przy usuwaniu oraz walidacji schematu) i kliknij <strong>Publish</strong>.
+                W lewym pasku nawigacji wybierz <strong>Firestore Database</strong> i kliknij{' '}
+                <strong>Create database</strong>:
+                <ul className="list-disc list-inside pl-3 mt-1.5 space-y-1">
+                  <li>
+                    Wybierz edycję <strong>Standard edition</strong> i kliknij <strong>Next</strong>.
+                  </li>
+                  <li>
+                    Zostaw Database ID jako <code>(default)</code>, wybierz lokalizację blisko siebie (np.{' '}
+                    <code>eur3 (europe-west)</code> lub <code>europe-west3 (Frankfurt)</code>) i kliknij{' '}
+                    <strong>Next → Create</strong>.
+                  </li>
+                  <li>
+                    Gdy baza się otworzy, na górnym pasku widoku Firestore przejdź do zakładki{' '}
+                    <strong>Rules</strong> (obok <em>Data | Indexes | Usage</em>), wklej reguły z pliku{' '}
+                    <code>firestore.rules</code> i kliknij <strong>Publish</strong>.
+                  </li>
+                  <li>
+                    <strong>Nie musisz klikać „+ Start collection”</strong> — zaloguj się jako Administrator w aplikacji, a wszystkie 6 kolekcji utworzy się automatycznie!
+                  </li>
+                </ul>
               </li>
             </ol>
           </div>
@@ -131,7 +175,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
           {/* PART 2: EDUCATIONAL MODULE EXPLANATION */}
           <div className="pt-4 border-t border-[var(--vault-border)] space-y-3">
             <h3 className="text-xs sm:text-sm font-bold text-[var(--vault-text)]">
-              Część 2. Za co odpowiada każdy moduł i jak współpracują ze sobą? (Edukacja)
+              Część 2. Za co odpowiada każdy moduł i jak współpracują ze sobą?
             </h3>
 
             <div className="grid grid-cols-1 gap-3">
@@ -139,11 +183,11 @@ export const FirebaseSetupGuideDropdown: React.FC<
                 <div className="font-bold text-[var(--vault-text)] flex items-center gap-1.5">
                   <KeyRound className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
                   <span>
-                    1. Moduł Firebase Authentication (<code>request.auth</code>) — Strażnik Tożsamości i Firewall Bazy
+                    1. Authentication with Identity Platform (<code>request.auth</code>)
                   </span>
                 </div>
                 <p className="text-[11px] text-[var(--vault-muted)]">
-                  <strong>Po co nam on:</strong> Generuje kryptograficzny token <code>request.auth</code> weryfikowany przez serwer Google przy każdym zapytaniu do bazy. <strong>Administrator</strong> otrzymuje token z logowania Google (<code>signInWithPopup</code>), natomiast <strong>urządzenia Domowników</strong> otrzymują w tle trwały token <code>Anonymous Auth</code> powiązany z ich kontem (<code>googleUid</code>) oraz Certyfikatem Sprzętowym. Dzięki temu reguły <code>firestore.rules</code> blokują każdą nieautoryzowaną próbę odczytu lub skasowania haseł z internetu (usuwać wpisy może wyłącznie ich właściciel lub Administrator).
+                  Dostawcy <strong>Google</strong> (dla Administratora) oraz <strong>Anonymous</strong> (dla urządzeń Domowników powiązanych z Certyfikatem Sprzętowym) wystawiają kryptograficzny token <code>request.auth.uid</code>. Dzięki temu reguły <code>firestore.rules</code> weryfikują właściciela każdego rekordu i chronią bazę przed nieautoryzowanym odczytem lub usunięciem.
                 </p>
               </div>
 
@@ -151,11 +195,11 @@ export const FirebaseSetupGuideDropdown: React.FC<
                 <div className="font-bold text-[var(--vault-text)] flex items-center gap-1.5">
                   <Database className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
                   <span>
-                    2. Moduł Cloud Firestore (<code>onSnapshot</code>) — Baza Czasu Rzeczywistego
+                    2. Cloud Firestore (<code>onSnapshot</code> + Auto-Inicjalizacja 6 Kolekcji)
                   </span>
                 </div>
                 <p className="text-[11px] text-[var(--vault-muted)]">
-                  <strong>Po co nam on:</strong> Zastępuje ręczne pliki na Google Drive. Zamiast pobierać i nadpisywać cały plik bazy, Firestore przechowuje osobne kolekcje (<code>vaultConfig</code>, <code>members</code>, <code>devices</code>, <code>passwords</code>, <code>invitations</code>) i utrzymuje otwarty kanał czasu rzeczywistego (<code>onSnapshot</code>). Gdy domownik zakłada konto z linku zaproszeniowego, widzisz jego prośbę natychmiast, a gdy klikniesz „Akceptuj”, jego telefon odblokowuje się w tej samej sekundzie bez odświeżania.
+                  Przechowuje 6 kolekcji (<code>vaultConfig</code>, <code>members</code>, <code>devices</code>, <code>passwords</code>, <code>invitations</code>, <code>activityLogs</code>) i synchronizuje je w czasie rzeczywistym. Przy podpięciu nowej, pustej bazy funkcja <code>ensureBaseCollectionsInitializedInFirestore</code> automatycznie zakłada brakujące kolekcje bez naruszania jakichkolwiek istniejących danych.
                 </p>
               </div>
 
@@ -167,7 +211,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
                   </span>
                 </div>
                 <p className="text-[11px] text-[var(--vault-muted)]">
-                  <strong>Dlaczego to kluczowe:</strong> Firebase pełni wyłącznie rolę „ślepego kuriera” i magazynu zaszyfrowanych danych (architektura <em>Zero-Knowledge</em>). Wyliczanie klucza głównego (DEK) z hasła użytkownika, sygnatury sprzętowej urządzenia (<code>HW-...</code>) oraz certyfikatu zatwierdzenia sprzętu odbywa się <strong>w 100% lokalnie w pamięci RAM Twojego telefonu</strong> przed wywołaniem <code>setDoc</code>. Do bazy Firestore trafia wyłącznie gotowy szyfrogram <code>ENC[AES-256-GCM:...]</code>, którego nawet serwery Google nie potrafią odszyfrować.
+                  Wyliczanie klucza głównego (DEK) z hasła użytkownika, sygnatury sprzętowej urządzenia (<code>HW-...</code>) oraz certyfikatu zatwierdzenia sprzętu odbywa się <strong>w 100% lokalnie w pamięci RAM Twojego urządzenia</strong> przed wywołaniem <code>setDoc</code>. Do bazy Firestore trafia wyłącznie gotowy szyfrogram <code>ENC[AES-256-GCM:...]</code>.
                 </p>
               </div>
             </div>
@@ -188,7 +232,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
                   &quot;apiKey&quot;
                 </code>
                 <p className="text-[var(--vault-muted)] mt-0.5">
-                  Identyfikator klucza Web API projektu Google Cloud. Pozwala bibliotece Firebase SDK nawiązać połączenie z Twoim projektem (bezpieczeństwa danych pilnują reguły <code>firestore.rules</code> oraz szyfrowanie E2E).
+                  Identyfikator klucza Web API projektu Google Cloud pozwalający bibliotece Firebase SDK połączyć się z Twoim projektem.
                 </p>
               </div>
 
@@ -197,7 +241,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
                   &quot;authDomain&quot;
                 </code>
                 <p className="text-[var(--vault-muted)] mt-0.5">
-                  Domena autoryzacyjna Twojego projektu (np. <code>projekt.firebaseapp.com</code>), która obsługuje bezpieczny proces logowania OAuth 2.0 kontem Google Administratora.
+                  Domena autoryzacyjna Twojego projektu (np. <code>projekt.firebaseapp.com</code>) obsługująca logowanie OAuth 2.0 kontem Google Administratora.
                 </p>
               </div>
 
@@ -206,7 +250,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
                   &quot;projectId&quot;
                 </code>
                 <p className="text-[var(--vault-muted)] mt-0.5">
-                  Unikalna nazwa Twojego projektu w chmurze Firebase, wskazująca dokładnie w którym kontenerze chmurowym znajduje się Twój Skarbiec.
+                  Unikalny identyfikator Twojego projektu w chmurze Firebase.
                 </p>
               </div>
 
@@ -215,7 +259,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
                   &quot;appId&quot;
                 </code>
                 <p className="text-[var(--vault-muted)] mt-0.5">
-                  Unikalny identyfikator konkretnej aplikacji Web/PWA zarejestrowanej wewnątrz Twojego projektu Firebase.
+                  Unikalny identyfikator aplikacji Web/PWA zarejestrowanej w sekcji <em>Project settings → Your apps</em>.
                 </p>
               </div>
 
@@ -225,7 +269,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
                 </code>{' '}
                 <span className="text-[var(--vault-muted)]">(opcjonalne)</span>
                 <p className="text-[var(--vault-muted)] mt-0.5">
-                  Nazwa konkretnej bazy danych wewnątrz projektu. Jeśli w konsoli Firebase utworzyłeś standardową bazę domyślną, pole to można pominąć (przyjmuje wartość <code>(default)</code>). Jeśli korzystasz z bazy nazwanej (np. wygenerowanej w AI Studio), wskazuje dokładną nazwę tej instancji.
+                  Nazwa bazy danych wewnątrz projektu. Dla standardowej bazy domyślnej pole to można pominąć (przyjmuje wartość <code>(default)</code>).
                 </p>
               </div>
             </div>

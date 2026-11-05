@@ -23,7 +23,9 @@ import {
   Settings,
 } from 'lucide-react';
 import {
+  createUserWithEmailAndPassword,
   onAuthStateChanged,
+  signInWithEmailAndPassword,
   signInWithPopup,
   User as FirebaseUser,
 } from 'firebase/auth';
@@ -31,8 +33,10 @@ import {
   auth,
   clearCustomFirebaseConfig,
   decodeFirebaseConfigFromInviteUrl,
+  ensureFirebaseAuthSession,
   getDeviceInstanceRole,
   getFirebaseProjectInfo,
+  getStoredCustomFirebaseConfig,
   googleProvider,
   isFirebaseConfigured,
   parseAndValidateFirebaseConfigInput,
@@ -305,6 +309,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
   const [copiedCustomLink, setCopiedCustomLink] = useState(false);
 
+  
   // Strict PWA-only enforcement outside AI Studio (GATEKEEP 1)
   const isRunningInInstalledPwa =
     isPWAInstalled || detectedDevice.clientMode === 'pwa';

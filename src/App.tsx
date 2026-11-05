@@ -8,6 +8,7 @@ import {
   WifiOff,
   Search,
   Eraser,
+  RefreshCw,
 } from 'lucide-react';
 import {
   onAuthStateChanged,
@@ -17,6 +18,7 @@ import {
 import {
   auth,
   ensureFirebaseAuthSession,
+  isFirebaseConfigured,
   testFirestoreConnection,
 } from './lib/firebase';
 import {
@@ -28,6 +30,8 @@ import {
   deleteInvitationFromFirestore,
   deleteMemberFromFirestore,
   deletePasswordFromFirestore,
+  ensureBaseCollectionsInitializedInFirestore,
+  fetchLiveVaultBootstrapStateFromFirestore,
   mergeMembersInFirestore,
   rebindDeviceCertificateInFirestore,
   replaceFullVaultStateInFirestore,
@@ -117,9 +121,14 @@ export default function App() {
   // Theme state (Low-Contrast: Soft Slate Dusk vs Warm Linen Paper)
   const [theme, setTheme] = useState<ThemeMode>('dusk');
 
-  // Cloud Firestore real-time collections (onSnapshot)
+  // Cloud Firestore real-time collections (onSnapshot) & Global Firebase Auth Loading State
   const [firebaseConfigVersion, setFirebaseConfigVersion] = useState(0);
   const [isInitialLoading, setIsInitialLoading] = useState(true);
+  const [isAuthStateResolved, setIsAuthStateResolved] = useState<boolean>(
+    () => !isFirebaseConfigured()
+  );
+  const [isSessionRestoreComplete, setIsSessionRestoreComplete] =
+    useState<boolean>(() => !isFirebaseConfigured());
   const [isUpdatingApp, setIsUpdatingApp] = useState(false);
   const [vaultConfig, setVaultConfig] = useState<VaultConfig | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -170,6 +179,15 @@ export default function App() {
   } | null>(null);
   const clipboardIntervalRef = useRef<number | null>(null);
 
+  // Clean up any legacy bypass key from localStorage on boot
+  useEffect(() => {
+    try {
+      localStorage.removeItem('fsv_aistudio_forced_entry_v1');
+    } catch {
+      // ignore
+    }
+  }, []);
+
   // Sync theme class with documentElement
   useEffect(() => {
     const root = document.documentElement;
@@ -187,7 +205,31 @@ export default function App() {
     }, 3500);
   }, []);
 
-  // Test connection to Cloud Firestore on boot & subscribe to real-time onSnapshot listeners
+  // 1. Global Firebase Auth State Listener (onAuthStateChanged):
+  // Ensures we wait for Firebase Auth to check browserLocalPersistence before deciding between /login and the vault
+  useEffect(() => {
+    if (!isFirebaseConfigured() || !auth) {
+      setIsAuthStateResolved(true);
+      setIsSessionRestoreComplete(true);
+      return;
+    }
+
+    setIsAuthStateResolved(false);
+    const unsubAuth = onAuthStateChanged(auth, () => {
+      setIsAuthStateResolved(true);
+    });
+
+    const authFallbackTimer = window.setTimeout(() => {
+      setIsAuthStateResolved(true);
+    }, 2500);
+
+    return () => {
+      window.clearTimeout(authFallbackTimer);
+      unsubAuth();
+    };
+  }, [firebaseConfigVersion]);
+
+  // 2. Test connection to Cloud Firestore on boot & subscribe to real-time onSnapshot listeners
   useEffect(() => {
     void testFirestoreConnection();
 
@@ -211,79 +253,107 @@ export default function App() {
     };
   }, [firebaseConfigVersion]);
 
-  // Restore remembered session OR native Firebase Auth Admin session when members load from Firestore
+  // 3. Restore active Firebase Auth session or remembered session once both Auth and initial Firestore sync complete
   useEffect(() => {
-    if (currentMemberId || isVaultLockedByTimeout || members.length === 0) {
+    if (!isAuthStateResolved || isInitialLoading) {
+      return;
+    }
+
+    if (currentMemberId || isVaultLockedByTimeout) {
+      setIsSessionRestoreComplete(true);
+      return;
+    }
+
+    if (members.length === 0) {
+      setIsSessionRestoreComplete(true);
       return;
     }
 
     let cancelled = false;
 
     const tryRestoreSession = async () => {
-      // 1. Check remembered session in localStorage (works for both Admin and Family Members)
       try {
-        const rawSession = localStorage.getItem(REMEMBERED_SESSION_KEY);
-        if (rawSession) {
-          const parsedSession = JSON.parse(rawSession) as RememberedVaultSession;
-          if (
-            parsedSession?.memberId &&
-            parsedSession?.dekBase64 &&
-            members.some(
-              (m) => m.id === parsedSession.memberId && m.status === 'active'
-            )
-          ) {
-            if (!cancelled) {
-              setCurrentMemberId(parsedSession.memberId);
-              setActiveDekBase64(parsedSession.dekBase64);
-              setActiveMergedDeks(parsedSession.mergedDeks || []);
+        // A. Check remembered session in localStorage (works for both Admin and Family Members across reloads/HMR)
+        try {
+          const rawSession = localStorage.getItem(REMEMBERED_SESSION_KEY);
+          if (rawSession) {
+            const parsedSession = JSON.parse(
+              rawSession
+            ) as RememberedVaultSession;
+            if (
+              parsedSession?.memberId &&
+              parsedSession?.dekBase64 &&
+              members.some(
+                (m) => m.id === parsedSession.memberId && m.status === 'active'
+              )
+            ) {
+              if (!cancelled) {
+                setCurrentMemberId(parsedSession.memberId);
+                setActiveDekBase64(parsedSession.dekBase64);
+                setActiveMergedDeks(parsedSession.mergedDeks || []);
+              }
+              return;
             }
-            return;
+          }
+        } catch {
+          // ignore storage errors
+        }
+
+        // B. Check active Firebase Auth user from onAuthStateChanged (browserLocalPersistence)
+        const fbUser = auth?.currentUser;
+        if (
+          fbUser &&
+          (!fbUser.isAnonymous ||
+            vaultConfig?.adminUid === fbUser.uid ||
+            members.some(
+              (m) => m.role === 'admin' && m.googleUid === fbUser.uid
+            ))
+        ) {
+          const adminMember = members.find(
+            (m) =>
+              m.googleUid === fbUser.uid ||
+              (vaultConfig?.adminUid === fbUser.uid &&
+                (m.role === 'admin' || m.id === vaultConfig?.adminMemberId)) ||
+              m.role === 'admin' ||
+              m.username.toLowerCase() === 'admin'
+          );
+          if (adminMember && adminMember.vaultEscrowKey) {
+            try {
+              const dekBase64 = await unwrapDekFromMergeEscrow(
+                adminMember.vaultEscrowKey,
+                adminMember.pbkdf2Salt
+              );
+              let mergedDeks: string[] = [];
+              try {
+                const parsed = JSON.parse(
+                  adminMember.mergedVaultKeysJson || '[]'
+                );
+                if (Array.isArray(parsed)) mergedDeks = parsed;
+              } catch {
+                mergedDeks = [];
+              }
+              if (!cancelled) {
+                setCurrentMemberId(adminMember.id);
+                setActiveDekBase64(dekBase64);
+                setActiveMergedDeks(mergedDeks);
+              }
+            } catch (err) {
+              console.warn('Auto-restore Admin DEK warning:', err);
+            }
           }
         }
-      } catch {
-        // ignore storage errors
-      }
-
-      // 2. Check native Firebase Auth Google user (browserLocalPersistence) for Primary Admin
-      const fbUser = auth?.currentUser;
-      if (fbUser && !fbUser.isAnonymous) {
-        const adminMember = members.find(
-          (m) =>
-            m.googleUid === fbUser.uid ||
-            m.role === 'admin' ||
-            m.username.toLowerCase() === 'admin'
-        );
-        if (adminMember && adminMember.vaultEscrowKey) {
-          try {
-            const dekBase64 = await unwrapDekFromMergeEscrow(
-              adminMember.vaultEscrowKey,
-              adminMember.pbkdf2Salt
-            );
-            let mergedDeks: string[] = [];
-            try {
-              const parsed = JSON.parse(
-                adminMember.mergedVaultKeysJson || '[]'
-              );
-              if (Array.isArray(parsed)) mergedDeks = parsed;
-            } catch {
-              mergedDeks = [];
-            }
-            if (!cancelled) {
-              setCurrentMemberId(adminMember.id);
-              setActiveDekBase64(dekBase64);
-              setActiveMergedDeks(mergedDeks);
-            }
-          } catch (err) {
-            console.warn('Auto-restore Admin DEK warning:', err);
-          }
+      } finally {
+        if (!cancelled) {
+          setIsSessionRestoreComplete(true);
         }
       }
     };
 
-    tryRestoreSession();
+    void tryRestoreSession();
+
     const unsubAuth = auth
       ? onAuthStateChanged(auth, () => {
-          tryRestoreSession();
+          void tryRestoreSession();
         })
       : () => {};
 
@@ -291,7 +361,16 @@ export default function App() {
       cancelled = true;
       unsubAuth();
     };
-  }, [members, currentMemberId, isVaultLockedByTimeout, firebaseConfigVersion]);
+  }, [
+    isAuthStateResolved,
+    isInitialLoading,
+    members,
+    vaultConfig?.adminUid,
+    vaultConfig?.adminMemberId,
+    currentMemberId,
+    isVaultLockedByTimeout,
+    firebaseConfigVersion,
+  ]);
 
   // Start clipboard auto-clear countdown
   const startClipboardCountdown = (seconds: number, label: string) => {
@@ -558,7 +637,7 @@ export default function App() {
     await appendActivityLogToFirestore(entry);
   };
 
-  // 1. PRIMARY ADMIN LOGIN VIA FIREBASE AUTH (Google Sign-In with browserLocalPersistence)
+  // 1. PRIMARY ADMIN LOGIN VIA FIREBASE AUTH (Google Sign-In or Dev Auth Session with browserLocalPersistence)
   const handleAdminGoogleLogin = async (options: {
     firebaseUser: FirebaseUser;
     masterPassword?: string;
@@ -569,16 +648,30 @@ export default function App() {
     const displayName = firebaseUser.displayName || 'Główny Administrator';
 
     const now = new Date().toISOString();
-    let adminMember = members.find(
-      (m) => m.role === 'admin' || m.username.toLowerCase() === 'admin'
+
+    // Always read live Firestore state first so we never rely on stale/empty React closures right after signIn
+    const liveState = await fetchLiveVaultBootstrapStateFromFirestore();
+    const effectiveConfig = liveState.vaultConfig || vaultConfig;
+    const effectiveMembers =
+      liveState.members.length > 0 ? liveState.members : members;
+    const effectiveDevices =
+      liveState.devices.length > 0 ? liveState.devices : devices;
+
+    let adminMember = effectiveMembers.find(
+      (m) =>
+        m.role === 'admin' ||
+        m.username.toLowerCase() === 'admin' ||
+        (effectiveConfig?.adminMemberId &&
+          m.id === effectiveConfig.adminMemberId)
     );
     let dekBase64: string;
     let isFirstBootstrap = false;
+    let activeConfigDoc: VaultConfig;
 
     if (!adminMember) {
       isFirstBootstrap = true;
       const adminMemberId =
-        vaultConfig?.adminMemberId || makeId('mem_admin');
+        effectiveConfig?.adminMemberId || makeId('mem_admin');
       const salt = generateSaltBase64(16);
       const effectivePassword =
         masterPassword && masterPassword.trim().length >= 4
@@ -609,80 +702,93 @@ export default function App() {
         updatedAt: now,
       };
 
-      const configDoc: VaultConfig = {
+      activeConfigDoc = {
         initialized: true,
         adminUid: uid,
         adminEmail: email,
         adminMemberId,
-        templatesLoaded: false,
-        categoriesJson: JSON.stringify(DEFAULT_CATEGORIES),
-        defaultTheme: theme,
-        clipboardClearSeconds: 30,
-        autoLockMinutes: 15,
-        createdAt: vaultConfig?.createdAt || now,
+        templatesLoaded: effectiveConfig?.templatesLoaded ?? false,
+        categoriesJson:
+          effectiveConfig?.categoriesJson || JSON.stringify(DEFAULT_CATEGORIES),
+        defaultTheme: effectiveConfig?.defaultTheme || theme,
+        clipboardClearSeconds: effectiveConfig?.clipboardClearSeconds || 30,
+        autoLockMinutes: effectiveConfig?.autoLockMinutes || 15,
+        createdAt: effectiveConfig?.createdAt || now,
         updatedAt: now,
       };
 
-      await saveVaultConfigToFirestore(configDoc);
+      await saveVaultConfigToFirestore(activeConfigDoc);
       await saveMemberToFirestore(adminMember.id, adminMember);
     } else {
-      const shouldUpdateIdentity =
-        adminMember.role !== 'admin' ||
-        adminMember.status !== 'active' ||
-        adminMember.googleUid !== uid ||
-        (displayName && adminMember.fullName === 'Główny Administrator');
+      activeConfigDoc = {
+        initialized: true,
+        adminUid: uid,
+        adminEmail: email,
+        adminMemberId: adminMember.id,
+        templatesLoaded: effectiveConfig?.templatesLoaded ?? false,
+        categoriesJson:
+          effectiveConfig?.categoriesJson || JSON.stringify(DEFAULT_CATEGORIES),
+        defaultTheme: effectiveConfig?.defaultTheme || theme,
+        clipboardClearSeconds: effectiveConfig?.clipboardClearSeconds || 30,
+        autoLockMinutes: effectiveConfig?.autoLockMinutes || 15,
+        createdAt: effectiveConfig?.createdAt || now,
+        updatedAt: now,
+      };
 
-      if (shouldUpdateIdentity) {
+      // Update vaultConfig/default FIRST so `isAdmin()` (vaultConfig.adminUid == request.auth.uid) is immediately true in Firestore Rules
+      await saveVaultConfigToFirestore(activeConfigDoc);
+
+      try {
+        dekBase64 = await unwrapDekFromMergeEscrow(
+          adminMember.vaultEscrowKey,
+          adminMember.pbkdf2Salt
+        );
+      } catch {
+        // Self-healing fallback if an older test record had a corrupted escrow key
+        const salt = adminMember.pbkdf2Salt || generateSaltBase64(16);
+        const effectivePassword =
+          masterPassword && masterPassword.trim().length >= 4
+            ? masterPassword.trim()
+            : `google_admin_${uid}_${salt}`;
+        const passwordHash = await hashPasswordForAuth(effectivePassword, salt);
+        dekBase64 = generateRandomDekBase64();
+        const wrappedMasterKey = await wrapDekWithPassword(
+          dekBase64,
+          effectivePassword,
+          salt
+        );
+        const vaultEscrowKey = await wrapDekForMergeEscrow(dekBase64, salt);
         adminMember = {
           ...adminMember,
-          fullName:
-            adminMember.fullName === 'Główny Administrator' && displayName
-              ? displayName
-              : adminMember.fullName,
-          role: 'admin',
-          status: 'active',
-          googleUid: uid,
-          updatedAt: now,
+          pbkdf2Salt: salt,
+          passwordHash,
+          wrappedMasterKey,
+          vaultEscrowKey,
         };
-        await saveMemberToFirestore(adminMember.id, adminMember);
       }
 
-      dekBase64 = await unwrapDekFromMergeEscrow(
-        adminMember.vaultEscrowKey,
-        adminMember.pbkdf2Salt
-      );
-
-      if (
-        !vaultConfig ||
-        !vaultConfig.initialized ||
-        vaultConfig.adminUid !== uid ||
-        vaultConfig.adminEmail !== email
-      ) {
-        const configDoc: VaultConfig = {
-          initialized: true,
-          adminUid: uid,
-          adminEmail: email,
-          adminMemberId: adminMember.id,
-          templatesLoaded: vaultConfig?.templatesLoaded ?? false,
-          categoriesJson:
-            vaultConfig?.categoriesJson || JSON.stringify(DEFAULT_CATEGORIES),
-          defaultTheme: vaultConfig?.defaultTheme || theme,
-          clipboardClearSeconds: vaultConfig?.clipboardClearSeconds || 30,
-          autoLockMinutes: vaultConfig?.autoLockMinutes || 15,
-          createdAt: vaultConfig?.createdAt || now,
-          updatedAt: now,
-        };
-        await saveVaultConfigToFirestore(configDoc);
-      }
+      adminMember = {
+        ...adminMember,
+        fullName:
+          adminMember.fullName === 'Główny Administrator' && displayName
+            ? displayName
+            : adminMember.fullName,
+        role: 'admin',
+        status: 'active',
+        googleUid: uid,
+        updatedAt: now,
+      };
+      await saveMemberToFirestore(adminMember.id, adminMember);
     }
 
     // Automatically pair & approve current device for Admin with Hardware Certificate
-    const existingDev = devices.find(
+    const existingDev = effectiveDevices.find(
       (d) =>
         d.memberId === adminMember!.id &&
         d.deviceFingerprint === detectedDevice.deviceFingerprint
     );
 
+    let savedAdminDevice: Device;
     if (!existingDev) {
       const devId = makeId('dev');
       const newAdminDev: Device = {
@@ -705,12 +811,9 @@ export default function App() {
         requestedAt: now,
         lastSeenAt: now,
       };
-      await saveDeviceToFirestore(devId, newAdminDev);
-    } else if (
-      existingDev.status !== 'approved' ||
-      !existingDev.hardwareSignatureHash
-    ) {
-      await saveDeviceToFirestore(existingDev.id, {
+      savedAdminDevice = await saveDeviceToFirestore(devId, newAdminDev);
+    } else {
+      savedAdminDevice = await saveDeviceToFirestore(existingDev.id, {
         ...existingDev,
         status: 'approved',
         hardwareModelOs: detectedDevice.hardwareModelOs,
@@ -720,6 +823,18 @@ export default function App() {
       });
     }
 
+    // Idempotently verify all 6 base collections (`vaultConfig`, `members`, `devices`, `passwords`, `invitations`, `activityLogs`):
+    // creates foundational documents ONLY in empty collections, leaving existing collections 100% untouched.
+    const initReport = await ensureBaseCollectionsInitializedInFirestore({
+      adminUid: uid,
+      adminEmail: email,
+      adminMemberId: adminMember.id,
+      adminMemberName: adminMember.fullName,
+      deviceName: detectedDevice.deviceName,
+      categoriesJson: activeConfigDoc.categoriesJson,
+      defaultTheme: activeConfigDoc.defaultTheme,
+    });
+
     let mergedDeks: string[] = [];
     try {
       const parsed = JSON.parse(adminMember.mergedVaultKeysJson || '[]');
@@ -728,23 +843,69 @@ export default function App() {
       mergedDeks = [];
     }
 
-    await logActivityInFirestore(
-      adminMember.id,
-      adminMember.fullName,
-      isFirstBootstrap ? 'VAULT_BOOTSTRAP' : 'ADMIN_FIREBASE_AUTH_LOGIN',
-      isFirstBootstrap
-        ? `Zainicjalizowano nowy skarbiec dla Pierwszego Administratora (${email}) w Cloud Firestore.`
-        : `Główny Administrator zalogował się przez Firebase Auth (${email}).`
-    );
+    try {
+      await logActivityInFirestore(
+        adminMember.id,
+        adminMember.fullName,
+        isFirstBootstrap ? 'VAULT_BOOTSTRAP' : 'ADMIN_FIREBASE_AUTH_LOGIN',
+        isFirstBootstrap
+          ? `Zainicjalizowano nowy skarbiec dla Pierwszego Administratora (${email}) w Cloud Firestore.`
+          : `Główny Administrator zalogował się przez Firebase Auth (${email}).`
+      );
+    } catch (logErr) {
+      console.warn('Activity log write warning:', logErr);
+    }
 
-    setCurrentMemberId(adminMember.id);
+    // Synchronously update React state so `currentMember` is immediately resolved on the next render
+    const finalAdminMember = adminMember;
+    setVaultConfig(activeConfigDoc);
+    setMembers((prev) => {
+      const baseList = prev.length > 0 ? prev : effectiveMembers;
+      const existsInList = baseList.some((m) => m.id === finalAdminMember.id);
+      return existsInList
+        ? baseList.map((m) =>
+            m.id === finalAdminMember.id ? finalAdminMember : m
+          )
+        : [finalAdminMember, ...baseList];
+    });
+    setDevices((prev) => {
+      const baseDevs = prev.length > 0 ? prev : effectiveDevices;
+      const existsInDevs = baseDevs.some((d) => d.id === savedAdminDevice.id);
+      return existsInDevs
+        ? baseDevs.map((d) =>
+            d.id === savedAdminDevice.id ? savedAdminDevice : d
+          )
+        : [savedAdminDevice, ...baseDevs];
+    });
+
+    try {
+      const sessionPayload: RememberedVaultSession = {
+        memberId: finalAdminMember.id,
+        dekBase64,
+        mergedDeks,
+        savedAt: now,
+      };
+      localStorage.setItem(
+        REMEMBERED_SESSION_KEY,
+        JSON.stringify(sessionPayload)
+      );
+    } catch {
+      // ignore storage errors
+    }
+
+    setPendingAuthState(null);
+    setCurrentMemberId(finalAdminMember.id);
     setActiveDekBase64(dekBase64);
     setActiveMergedDeks(mergedDeks);
     setIsVaultLockedByTimeout(false);
+    setFirebaseConfigVersion((v) => v + 1);
+
     showToast(
-      isFirstBootstrap
-        ? `Utworzono nowy skarbiec dla ${email} w Cloud Firestore!`
-        : `Zalogowano przez Firebase Auth jako ${email}!`
+      initReport.initializedCollections.length > 0
+        ? `Zalogowano i utworzono brakujące kolekcje bazowe (${initReport.initializedCollections.join(', ')})!`
+        : isFirstBootstrap
+          ? `Utworzono nowy skarbiec dla ${email} w Cloud Firestore!`
+          : `Zalogowano przez Firebase Auth jako ${email}!`
     );
   };
 
@@ -2338,10 +2499,10 @@ export default function App() {
   const handleLogout = async () => {
     try {
       localStorage.removeItem(REMEMBERED_SESSION_KEY);
-          } catch {
+    } catch {
       // ignore
     }
-    // Sign out of Google Auth if logged in as a non-anonymous user; preserve anonymous device UID for family member hardware certificate binding
+    // Sign out of Firebase Auth if logged in as a non-anonymous user; preserve anonymous device UID for family member hardware certificate binding
     if (auth && auth.currentUser && !auth.currentUser.isAnonymous) {
       await signOut(auth).catch(() => {});
       void ensureFirebaseAuthSession(false);
@@ -2404,9 +2565,15 @@ export default function App() {
 
       {/* Main Content Container */}
       <main className="flex-1 w-full max-w-6xl mx-auto px-6 py-8">
-        {isInitialLoading ? (
-          <div className="py-16 text-center text-sm text-[var(--vault-muted)]">
-            Łączenie z bazą danych Cloud Firestore (onSnapshot)...
+        {isInitialLoading || !isAuthStateResolved || !isSessionRestoreComplete ? (
+          <div className="py-20 flex flex-col items-center justify-center text-center space-y-3">
+            <RefreshCw className="w-7 h-7 animate-spin text-[var(--vault-accent)]" />
+            <div className="text-sm font-semibold text-[var(--vault-text)]">
+              Weryfikacja aktywnej sesji Firebase Auth (onAuthStateChanged)...
+            </div>
+            <p className="text-xs text-[var(--vault-muted)] max-w-md">
+              Sprawdzanie poświadczeń w przeglądarce oraz synchronizacja danych skarbca z Cloud Firestore.
+            </p>
           </div>
         ) : !currentMember || isVaultLockedByTimeout ? (
           <AuthAndBootstrapView
@@ -2556,6 +2723,32 @@ export default function App() {
                 onUpdateSystemSettings={handleUpdateSystemSettings}
                 onDownloadLocalBackupFile={handleDownloadLocalBackupFile}
                 onRestoreBackupFromFile={handleRestoreBackupFromFile}
+                onEnsureBaseCollections={async () => {
+                  const res = await ensureBaseCollectionsInitializedInFirestore({
+                    adminUid:
+                      auth?.currentUser?.uid ||
+                      currentMember.googleUid ||
+                      vaultConfig?.adminUid ||
+                      'admin',
+                    adminEmail:
+                      auth?.currentUser?.email ||
+                      vaultConfig?.adminEmail ||
+                      'admin@familystream.local',
+                    adminMemberId: currentMember.id,
+                    adminMemberName: currentMember.fullName,
+                    deviceName: detectedDevice.deviceName,
+                    categoriesJson:
+                      vaultConfig?.categoriesJson ||
+                      JSON.stringify(DEFAULT_CATEGORIES),
+                    defaultTheme: vaultConfig?.defaultTheme || theme,
+                  });
+                  showToast(
+                    res.initializedCollections.length > 0
+                      ? `Utworzono brakujące kolekcje: ${res.initializedCollections.join(', ')}!`
+                      : 'Wszystkie 6 kolekcji bazowych już istnieje w bazie (dane nienaruszone).'
+                  );
+                  return res;
+                }}
               />
                           ) : (
               /* CLEAN PASSWORD VAULT VIEW (Identical privacy rules for all users + Section 03 for revealed entries) */

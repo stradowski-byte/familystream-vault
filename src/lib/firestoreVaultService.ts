@@ -195,7 +195,9 @@ export function subscribeToVaultFirestoreRealtime(
   }
 
   let snapshotUnsubscribers: Unsubscribe[] = [];
-  let attachedSessionKey: string | null = null;
+  let roleScopedUnsubscribers: Unsubscribe[] = [];
+  let attachedUid: string | null = null;
+  let attachedRoleScope: 'admin' | 'member' | null = null;
   let initialConfigLoaded = false;
   let initialMembersLoaded = false;
   let notifiedInitial = false;
@@ -208,27 +210,96 @@ export function subscribeToVaultFirestoreRealtime(
     }
   };
 
+  const detachRoleScopedSnapshots = () => {
+    roleScopedUnsubscribers.forEach((u) => u());
+    roleScopedUnsubscribers = [];
+    attachedRoleScope = null;
+  };
+
   const detachSnapshots = () => {
+    detachRoleScopedSnapshots();
     snapshotUnsubscribers.forEach((u) => u());
     snapshotUnsubscribers = [];
-    attachedSessionKey = null;
+    attachedUid = null;
+  };
+
+  const attachRoleScopedListeners = (uid: string, isVaultAdmin: boolean) => {
+    if (isDisposed) return;
+    const targetScope: 'admin' | 'member' = isVaultAdmin ? 'admin' : 'member';
+    if (attachedRoleScope === targetScope) return;
+    detachRoleScopedSnapshots();
+    attachedRoleScope = targetScope;
+
+    // 4. /passwords (E2E AES-256-GCM encrypted records)
+    // SaaS Admin (vaultConfig.adminUid == request.auth.uid) lists all records;
+    // Family Members list only records where request.auth.uid is in allowedMemberIds
+    const passwordsRefOrQuery = isVaultAdmin
+      ? collection(db, 'passwords')
+      : query(
+          collection(db, 'passwords'),
+          where('allowedMemberIds', 'array-contains', uid)
+        );
+    roleScopedUnsubscribers.push(
+      onSnapshot(
+        passwordsRefOrQuery,
+        (snap) => {
+          const list = snap.docs.map((d) => ({
+            ...(d.data() as PasswordRecord),
+            id: d.id,
+          }));
+          callbacks.onPasswords(list);
+        },
+        (err) => {
+          if (auth.currentUser) {
+            handleFirestoreError(err, OperationType.LIST, 'passwords');
+          }
+        }
+      )
+    );
+
+    // 6. /activityLogs (Strictly restricted to isAdmin() in firestore.rules)
+    if (isVaultAdmin) {
+      const logsQuery = query(
+        collection(db, 'activityLogs'),
+        orderBy('timestamp', 'desc'),
+        limit(150)
+      );
+      roleScopedUnsubscribers.push(
+        onSnapshot(
+          logsQuery,
+          (snap) => {
+            const list = snap.docs.map((d) => ({
+              ...(d.data() as ActivityLog),
+              id: d.id,
+            }));
+            callbacks.onActivityLogs(list);
+          },
+          (err) => {
+            if (auth.currentUser) {
+              handleFirestoreError(err, OperationType.LIST, 'activityLogs');
+            }
+          }
+        )
+      );
+    } else {
+      callbacks.onActivityLogs([]);
+    }
   };
 
   const attachSnapshotsForUser = (user: User) => {
-    const isGoogleAdminUser = !user.isAnonymous && Boolean(user.emailVerified);
-    const sessionKey = `${user.uid}:${isGoogleAdminUser ? 'admin' : 'member'}`;
-    if (isDisposed || attachedSessionKey === sessionKey) return;
+    if (isDisposed || attachedUid === user.uid) return;
     detachSnapshots();
-    attachedSessionKey = sessionKey;
+    attachedUid = user.uid;
 
-    // 1. /vaultConfig/default
+    // 1. /vaultConfig/default — resolves SaaS Admin ownership (cfg.adminUid === user.uid)
     snapshotUnsubscribers.push(
       onSnapshot(
         doc(db, 'vaultConfig', 'default'),
         (snap) => {
-          callbacks.onVaultConfig(
-            snap.exists() ? (snap.data() as VaultConfig) : null
-          );
+          const cfg = snap.exists() ? (snap.data() as VaultConfig) : null;
+          callbacks.onVaultConfig(cfg);
+          const isVaultAdmin = Boolean(cfg && cfg.adminUid === user.uid);
+          attachRoleScopedListeners(user.uid, isVaultAdmin);
           initialConfigLoaded = true;
           checkInitialComplete();
         },
@@ -286,32 +357,6 @@ export function subscribeToVaultFirestoreRealtime(
       )
     );
 
-    // 4. /passwords (E2E AES-256-GCM encrypted records)
-    // Google Admin lists all records; Family Members list only records where request.auth.uid is in allowedMemberIds
-    const passwordsRefOrQuery = isGoogleAdminUser
-      ? collection(db, 'passwords')
-      : query(
-          collection(db, 'passwords'),
-          where('allowedMemberIds', 'array-contains', user.uid)
-        );
-    snapshotUnsubscribers.push(
-      onSnapshot(
-        passwordsRefOrQuery,
-        (snap) => {
-          const list = snap.docs.map((d) => ({
-            ...(d.data() as PasswordRecord),
-            id: d.id,
-          }));
-          callbacks.onPasswords(list);
-        },
-        (err) => {
-          if (auth.currentUser) {
-            handleFirestoreError(err, OperationType.LIST, 'passwords');
-          }
-        }
-      )
-    );
-
     // 5. /invitations
     snapshotUnsubscribers.push(
       onSnapshot(
@@ -330,37 +375,9 @@ export function subscribeToVaultFirestoreRealtime(
         }
       )
     );
-
-    // 6. /activityLogs (Strictly restricted to Administrator in firestore.rules)
-    if (isGoogleAdminUser) {
-      const logsQuery = query(
-        collection(db, 'activityLogs'),
-        orderBy('timestamp', 'desc'),
-        limit(150)
-      );
-      snapshotUnsubscribers.push(
-        onSnapshot(
-          logsQuery,
-          (snap) => {
-            const list = snap.docs.map((d) => ({
-              ...(d.data() as ActivityLog),
-              id: d.id,
-            }));
-            callbacks.onActivityLogs(list);
-          },
-          (err) => {
-            if (auth.currentUser) {
-              handleFirestoreError(err, OperationType.LIST, 'activityLogs');
-            }
-          }
-        )
-      );
-    } else {
-      callbacks.onActivityLogs([]);
-    }
   };
 
-  // Listen to Firebase Auth state changes (Google Auth or Anonymous Auth)
+  // Listen to Firebase Auth state changes (Google Auth, Email/Password Auth, or Anonymous Auth)
   const unsubAuth = onAuthStateChanged(auth, (user) => {
     if (isDisposed) return;
     if (user) {
@@ -370,13 +387,12 @@ export function subscribeToVaultFirestoreRealtime(
     }
   });
 
-  // Ensure an active Firebase Auth session (reuses Google session or creates Anonymous session)
+  // Ensure an active Firebase Auth session (reuses Google/Email session or creates Anonymous session)
   void ensureFirebaseAuthSession(false).then((user) => {
     if (isDisposed) return;
     if (user) {
       attachSnapshotsForUser(user);
     } else {
-      // If no session could be established yet (e.g., waiting for Admin Google Login), allow UI to render
       initialConfigLoaded = true;
       initialMembersLoaded = true;
       checkInitialComplete();
@@ -502,6 +518,61 @@ export async function deletePasswordFromFirestore(
   }
 }
 
+export async function fetchLiveVaultBootstrapStateFromFirestore(): Promise<{
+  vaultConfig: VaultConfig | null;
+  members: Member[];
+  devices: Device[];
+}> {
+  if (!isFirebaseConfigured() || !db) {
+    return { vaultConfig: null, members: [], devices: [] };
+  }
+  const user = await ensureFirebaseAuthSession(false);
+  if (!user) {
+    return { vaultConfig: null, members: [], devices: [] };
+  }
+
+  let liveConfig: VaultConfig | null = null;
+  let liveMembers: Member[] = [];
+  let liveDevices: Device[] = [];
+
+  try {
+    const cfgSnap = await getDoc(doc(db, 'vaultConfig', 'default'));
+    if (cfgSnap.exists()) {
+      liveConfig = cfgSnap.data() as VaultConfig;
+    }
+  } catch (err) {
+    console.warn('Live vaultConfig read warning:', err);
+  }
+
+  try {
+    const memSnap = await getDocs(collection(db, 'members'));
+    liveMembers = memSnap.docs.map((d) => ({
+      ...(d.data() as Member),
+      id: d.id,
+    }));
+  } catch (err) {
+    console.warn('Live members read warning:', err);
+  }
+
+  try {
+    const devSnap = await getDocs(collection(db, 'devices'));
+    liveDevices = devSnap.docs.map((d) =>
+      ensureDeviceHardwareCertificate({
+        ...(d.data() as Device),
+        id: d.id,
+      })
+    );
+  } catch (err) {
+    console.warn('Live devices read warning:', err);
+  }
+
+  return {
+    vaultConfig: liveConfig,
+    members: liveMembers,
+    devices: liveDevices,
+  };
+}
+
 export async function saveVaultConfigToFirestore(
   config: VaultConfig
 ): Promise<void> {
@@ -510,27 +581,58 @@ export async function saveVaultConfigToFirestore(
     const user = await ensureFirebaseAuthSession(false);
     if (!user) return;
 
+    const existingSnap = await getDoc(doc(db, 'vaultConfig', 'default'));
+    const exists = existingSnap.exists();
+    const base = exists ? (existingSnap.data() as VaultConfig) : null;
+
+    const now = new Date().toISOString();
     const cleanConfig: VaultConfig = {
       initialized: Boolean(config.initialized),
-      adminUid: (config.adminUid || user.uid || 'admin').slice(0, 125),
-      adminEmail: (config.adminEmail || 'admin@familystream.local').slice(
+      adminUid: (config.adminUid || user.uid || base?.adminUid || 'admin').slice(
         0,
-        250
+        125
       ),
-      adminMemberId: (config.adminMemberId || 'mem_admin').slice(0, 125),
-      templatesLoaded: Boolean(config.templatesLoaded),
-      categoriesJson: (config.categoriesJson || '[]').slice(0, 19500),
-      defaultTheme: config.defaultTheme === 'linen' ? 'linen' : 'dusk',
+      adminEmail: (
+        config.adminEmail ||
+        base?.adminEmail ||
+        user.email ||
+        'admin@familystream.local'
+      ).slice(0, 250),
+      adminMemberId: (
+        config.adminMemberId ||
+        base?.adminMemberId ||
+        'mem_admin'
+      ).slice(0, 125),
+      templatesLoaded: Boolean(
+        config.templatesLoaded ?? base?.templatesLoaded ?? false
+      ),
+      categoriesJson: (
+        config.categoriesJson ||
+        base?.categoriesJson ||
+        '[]'
+      ).slice(0, 19500),
+      defaultTheme:
+        (config.defaultTheme || base?.defaultTheme) === 'linen'
+          ? 'linen'
+          : 'dusk',
       clipboardClearSeconds: Math.min(
         600,
-        Math.max(5, Number(config.clipboardClearSeconds || 30))
+        Math.max(
+          5,
+          Number(
+            config.clipboardClearSeconds ?? base?.clipboardClearSeconds ?? 30
+          )
+        )
       ),
       autoLockMinutes: Math.min(
         1440,
-        Math.max(1, Number(config.autoLockMinutes || 15))
+        Math.max(
+          1,
+          Number(config.autoLockMinutes ?? base?.autoLockMinutes ?? 15)
+        )
       ),
-      createdAt: config.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      createdAt: (exists ? base?.createdAt : config.createdAt) || now,
+      updatedAt: now,
     };
     await setDoc(doc(db, 'vaultConfig', 'default'), cleanConfig);
   } catch (err) {
@@ -980,9 +1082,183 @@ export async function replaceFullVaultStateInFirestore(params: {
   }
 }
 
+export interface BaseCollectionsInitReport {
+  initializedCollections: string[];
+  skippedExistingCollections: string[];
+}
+
+/**
+ * Idempotent, 100% non-destructive initializer for all 6 base collections in a Firebase project:
+ * (`vaultConfig`, `members`, `devices`, `passwords`, `invitations`, `activityLogs`).
+ * Checks each collection individually with `limit(1)` — if a collection already has at least 1 document,
+ * it does NOTHING to that collection (never overwrites or deletes existing data).
+ * If a collection is completely empty, it creates a valid foundational document so the collection
+ * immediately exists in Cloud Firestore.
+ */
+export async function ensureBaseCollectionsInitializedInFirestore(params: {
+  adminUid: string;
+  adminEmail: string;
+  adminMemberId: string;
+  adminMemberName: string;
+  deviceName?: string;
+  categoriesJson: string;
+  defaultTheme: 'dusk' | 'linen';
+}): Promise<BaseCollectionsInitReport> {
+  const initializedCollections: string[] = [];
+  const skippedExistingCollections: string[] = [];
+
+  try {
+    const user = await ensureFirebaseAuthSession(false);
+    if (!user) {
+      return { initializedCollections, skippedExistingCollections };
+    }
+
+    const now = new Date().toISOString();
+    const effectiveAdminUid = params.adminUid || user.uid;
+
+    // 1. Collection: vaultConfig (/vaultConfig/default)
+    const cfgSnap = await getDoc(doc(db, 'vaultConfig', 'default'));
+    if (cfgSnap.exists()) {
+      skippedExistingCollections.push('vaultConfig');
+    } else {
+      await saveVaultConfigToFirestore({
+        initialized: true,
+        adminUid: effectiveAdminUid,
+        adminEmail: params.adminEmail || user.email || 'admin@familystream.local',
+        adminMemberId: params.adminMemberId,
+        templatesLoaded: false,
+        categoriesJson: params.categoriesJson,
+        defaultTheme: params.defaultTheme,
+        clipboardClearSeconds: 30,
+        autoLockMinutes: 15,
+        createdAt: now,
+        updatedAt: now,
+      });
+      initializedCollections.push('vaultConfig');
+    }
+
+    // 2. Collection: members
+    const membersSnap = await getDocs(
+      query(collection(db, 'members'), limit(1))
+    );
+    if (!membersSnap.empty) {
+      skippedExistingCollections.push('members');
+    } else {
+      initializedCollections.push('members');
+    }
+
+    // 3. Collection: devices
+    const devicesSnap = await getDocs(
+      query(collection(db, 'devices'), limit(1))
+    );
+    if (!devicesSnap.empty) {
+      skippedExistingCollections.push('devices');
+    } else {
+      initializedCollections.push('devices');
+    }
+
+    // 4. Collection: passwords (check with Admin or allowedMemberIds query)
+    const passwordsSnap = await getDocs(
+      query(collection(db, 'passwords'), limit(1))
+    );
+    if (!passwordsSnap.empty) {
+      skippedExistingCollections.push('passwords');
+    } else {
+      const bootstrapPwId = 'pw_bootstrap_welcome';
+      const allowed = Array.from(
+        new Set([params.adminMemberId, effectiveAdminUid].filter(Boolean))
+      );
+      await savePasswordToFirestore(bootstrapPwId, {
+        id: bootstrapPwId,
+        section: 'shared',
+        categoryId: 'other',
+        serviceName: 'Karta Startowa FamilyStream Vault',
+        serviceUrl: 'https://console.firebase.google.com/',
+        login: (params.adminEmail || 'admin').slice(0, 250),
+        passwordValue: 'Skarbiec-Zainicjalizowany-E2E',
+        encryptedPayload: '',
+        keySalt: '',
+        ownerId: params.adminMemberId,
+        ownerName: (params.adminMemberName || 'Główny Administrator').slice(
+          0,
+          115
+        ),
+        allowedMemberIds: allowed,
+        revealToAdmin: false,
+        subAccountsJson: '[]',
+        createdAt: now,
+        updatedAt: now,
+        passwordUpdatedAt: now,
+      });
+      initializedCollections.push('passwords');
+    }
+
+    // 5. Collection: invitations
+    const invitationsSnap = await getDocs(
+      query(collection(db, 'invitations'), limit(1))
+    );
+    if (!invitationsSnap.empty) {
+      skippedExistingCollections.push('invitations');
+    } else {
+      const bootstrapInvId = 'inv_bootstrap_init';
+      const bootstrapInvite: VaultInvitation = {
+        id: bootstrapInvId,
+        token: 'init_collection_bootstrap',
+        purpose: 'new_member',
+        mode: 'single_use',
+        invitedLabel: 'Rekord inicjalizacyjny kolekcji invitations',
+        createdByMemberId: params.adminMemberId,
+        createdByMemberName: (
+          params.adminMemberName || 'Główny Administrator'
+        ).slice(0, 115),
+        expiresAt: now,
+        maxUses: 1,
+        usedCount: 1,
+        status: 'used',
+        createdAt: now,
+        lastUsedAt: now,
+      };
+      await setDoc(doc(db, 'invitations', bootstrapInvId), bootstrapInvite);
+      initializedCollections.push('invitations');
+    }
+
+    // 6. Collection: activityLogs
+    const logsSnap = await getDocs(
+      query(collection(db, 'activityLogs'), limit(1))
+    );
+    if (!logsSnap.empty) {
+      skippedExistingCollections.push('activityLogs');
+    } else {
+      await appendActivityLogToFirestore({
+        id: 'log_bootstrap_init',
+        actorId: params.adminMemberId,
+        actorName: (params.adminMemberName || 'Główny Administrator').slice(
+          0,
+          115
+        ),
+        actionType: 'COLLECTIONS_INITIALIZED',
+        details:
+          'Zweryfikowano i utworzono brakujące kolekcje bazowe w Cloud Firestore bez naruszania istniejących danych.',
+        deviceInfo: (params.deviceName || 'Urządzenie Administratora').slice(
+          0,
+          190
+        ),
+        timestamp: now,
+      });
+      initializedCollections.push('activityLogs');
+    }
+
+    return { initializedCollections, skippedExistingCollections };
+  } catch (err) {
+    console.warn('Collection bootstrapper warning:', err);
+    return { initializedCollections, skippedExistingCollections };
+  }
+}
+
 export {
   unwrapDekFromMergeEscrow,
   unwrapDekWithHardwareCertificate,
   unwrapDekWithPassword,
   wrapDekWithHardwareCertificate,
 };
+
