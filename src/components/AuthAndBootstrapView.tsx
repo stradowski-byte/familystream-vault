@@ -748,44 +748,44 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               </span>
             </div>
             <h1 className="text-xl sm:text-2xl font-bold font-display text-[var(--vault-text)] leading-snug">
-              Załaduj lokalnie plik JSON konfiguracji Firebase
+              Załaduj lokalnie konfigurację z Firebase Console
             </h1>
             <p className="text-xs sm:text-sm text-[var(--vault-muted)] leading-relaxed">
-              Publiczne repozytorium na GitHubie nie przechowuje żadnych kluczy Firebase. Wgraj swój plik <code className="font-mono text-[var(--vault-text)]">firebase-config.json</code> lub wklej obiekt konfiguracyjny poniżej — to wyzwoli utworzenie instancji Administratora i otworzy logowanie Google.
+              Publiczne repozytorium na GitHubie nie przechowuje żadnych kluczy Firebase. Wklej skopiowany prosto z Firebase Console obiekt <code className="font-mono text-[var(--vault-text)]">firebaseConfig</code> (dokładnie w takim formacie, w jakim podaje go Google — bez przerabiania na JSON) lub wgraj go z pliku.
             </p>
           </div>
 
           {/* Collapsible Step-by-Step Guide & Module Educational Explanation */}
           <FirebaseSetupGuideDropdown />
 
-          {/* Option A: 1-Tap File Upload (.json) */}
+          {/* Option A: 1-Tap File Upload (.json / .txt / .js) */}
           <div className="p-4 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-3">
             <div className="text-xs font-semibold text-[var(--vault-text)]">
-              Opcja A (Najszybsza): Wybierz plik <code className="font-mono">.json</code> z pamięci urządzenia
+              Opcja A: Wybierz plik z konfiguracją (<code className="font-mono">.json</code>, <code className="font-mono">.txt</code> lub <code className="font-mono">.js</code>) z pamięci urządzenia
             </div>
             <label className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl transition-colors cursor-pointer shadow-sm">
               <Upload className="w-4 h-4 shrink-0" />
-              <span>Wybierz plik firebase-config.json z urządzenia</span>
+              <span>Wybierz plik konfiguracji Firebase z urządzenia</span>
               <input
                 type="file"
-                accept=".json,application/json,text/plain"
+                accept=".json,.txt,.js,application/json,text/plain,text/javascript"
                 onChange={handleFirebaseJsonFileSelect}
                 className="hidden"
               />
             </label>
           </div>
 
-          {/* Option B: Paste JSON or firebaseConfig snippet */}
+          {/* Option B: Paste raw firebaseConfig snippet directly from Firebase Console */}
           <form onSubmit={handleFirebaseJsonSubmit} className="space-y-4">
             <div>
               <label className="block text-xs font-medium text-[var(--vault-muted)] mb-1">
-                Opcja B: Wklej zawartość JSON lub obiekt <code className="font-mono">firebaseConfig</code> z Firebase Console
+                Opcja B: Wklej surowy config prosto z Firebase Console (bez żadnego formatowania)
               </label>
               <textarea
-                rows={6}
+                rows={8}
                 value={rawFirebaseJsonInput}
                 onChange={(e) => setRawFirebaseJsonInput(e.target.value)}
-                placeholder={`{\n  "apiKey": "AIzaSy...",\n  "authDomain": "twoj-projekt.firebaseapp.com",\n  "projectId": "twoj-projekt",\n  "appId": "1:...",\n  "firestoreDatabaseId": "(default)"\n}`}
+                placeholder={`{\n  apiKey: "AIzaSy...",\n  authDomain: "twoj-projekt.firebaseapp.com",\n  projectId: "twoj-projekt",\n  storageBucket: "twoj-projekt.firebasestorage.app",\n  messagingSenderId: "1234567890",\n  appId: "1:1234567890:web:...",\n  measurementId: "G-..."\n};`}
                 className="w-full px-3 py-2 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
               />
             </div>

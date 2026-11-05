@@ -97,7 +97,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
 
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Pobierz obiekt <code>firebaseConfig</code> (Koło zębate → Project settings → Your apps):
+                  Skopiuj obiekt <code>firebaseConfig</code> (Koło zębate → Project settings → Your apps):
                 </strong>{' '}
                 W lewym wąskim pasku nawigacji kliknij ikonę{' '}
                 <strong>koła zębatego (⚙) → Project settings</strong>. W zakładce{' '}
@@ -105,9 +105,8 @@ export const FirebaseSetupGuideDropdown: React.FC<
                 <strong>Your apps</strong> i kliknij okrągłą ikonę{' '}
                 <strong>Web (<code>&lt;/&gt;</code>)</strong>. Wpisz nazwę (np.{' '}
                 <code>FamilyStream Vault PWA</code>) i kliknij{' '}
-                <strong>Register app</strong>. Skopiuj sam obiekt{' '}
-                <code>&#123; apiKey: &quot;...&quot;, ... &#125;</code> i wklej go w formularzu lub zapisz jako plik{' '}
-                <code>firebase-config.json</code>.
+                <strong>Register app</strong>. Skopiuj blok{' '}
+                <code>&#123; apiKey: &quot;...&quot;, ... &#125;;</code> (lub cały kod SDK) i wklej go bezpośrednio w formularzu — <strong>bez dodawania cudzysłowów wokół kluczy i bez przerabiania na JSON</strong>.
               </li>
 
               <li>

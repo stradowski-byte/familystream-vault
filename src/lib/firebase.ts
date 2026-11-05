@@ -109,80 +109,88 @@ export function decodeFirebaseConfigFromInviteUrl(
   }
 }
 
+function extractConfigField(raw: string, fieldName: string): string {
+  const quotedMatch = new RegExp(
+    `["'\`]?\\b${fieldName}\\b["'\`]?\\s*[:=]\\s*["'\`]([^"'\`\\r\\n]+)["'\`]`,
+    'i'
+  ).exec(raw);
+  if (quotedMatch && quotedMatch[1]) {
+    return quotedMatch[1].trim();
+  }
+  const unquotedMatch = new RegExp(
+    `["'\`]?\\b${fieldName}\\b["'\`]?\\s*[:=]\\s*([^,\\s;}\\r\\n]+)`,
+    'i'
+  ).exec(raw);
+  if (unquotedMatch && unquotedMatch[1]) {
+    return unquotedMatch[1].replace(/^["'\`]|["'\`]$/g, '').trim();
+  }
+  return '';
+}
+
 export function parseAndValidateFirebaseConfigInput(
   rawInput: string,
   overrideDatabaseId?: string
 ): CustomFirebaseConfig {
   const trimmed = rawInput.trim();
   if (!trimmed) {
-    throw new Error('Wklej zawartość pliku JSON lub obiekt firebaseConfig.');
+    throw new Error(
+      'Wklej obiekt konfiguracji skopiowany z Firebase Console lub wgraj plik z konfiguracją.'
+    );
   }
 
-  let parsed: Record<string, unknown> | null = null;
-
-  // 1. Try direct JSON parse
+  let jsonParsed: Record<string, unknown> = {};
   try {
     const candidate = JSON.parse(trimmed);
     if (candidate && typeof candidate === 'object') {
-      parsed = candidate as Record<string, unknown>;
+      jsonParsed = candidate as Record<string, unknown>;
     }
   } catch {
-    // 2. Try extracting {...} block from JS snippet (e.g. const firebaseConfig = { ... };)
-    const firstBrace = trimmed.indexOf('{');
-    const lastBrace = trimmed.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      const objectSlice = trimmed.slice(firstBrace, lastBrace + 1);
-      try {
-        parsed = JSON.parse(objectSlice) as Record<string, unknown>;
-      } catch {
-        // Convert unquoted JS keys to quoted JSON keys
-        const jsonified = objectSlice
-          .replace(/\/\/.*$/gm, '')
-          .replace(/([,{]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":')
-          .replace(/'([^']*)'/g, '"$1"')
-          .replace(/,\s*([}\]])/g, '$1');
-        try {
-          parsed = JSON.parse(jsonified) as Record<string, unknown>;
-        } catch {
-          throw new Error(
-            'Nie udało się odczytać formatu JSON. Upewnij się, że wklejasz poprawny plik JSON lub obiekt firebaseConfig z konsoli Firebase.'
-          );
-        }
-      }
-    } else {
-      throw new Error(
-        'Nie znaleziono obiektu JSON ({ ... }). Wgraj poprawny plik .json lub wklej obiekt firebaseConfig.'
-      );
-    }
+    // Native JS snippet from Firebase Console (e.g. { apiKey: "...", ... }; or const firebaseConfig = { ... };)
+    // is handled directly by extractConfigField below without requiring JSON formatting.
   }
 
-  if (!parsed) {
-    throw new Error('Nieprawidłowa struktura konfiguracji Firebase.');
-  }
-
-  const apiKey = String(parsed.apiKey || '').trim();
-  const projectId = String(parsed.projectId || '').trim();
-  const rawAuthDomain = String(parsed.authDomain || '')
+  const apiKey = (
+    extractConfigField(trimmed, 'apiKey') || String(jsonParsed.apiKey || '')
+  ).trim();
+  const projectId = (
+    extractConfigField(trimmed, 'projectId') ||
+    String(jsonParsed.projectId || '')
+  ).trim();
+  const rawAuthDomain = (
+    extractConfigField(trimmed, 'authDomain') ||
+    String(jsonParsed.authDomain || '')
+  )
     .trim()
     .replace(/^https?:\/\//i, '')
     .replace(/\/+$/, '');
   const authDomain =
-    rawAuthDomain || (projectId ? `${projectId.toLowerCase()}.firebaseapp.com` : '');
-  const appId = String(parsed.appId || '').trim();
+    rawAuthDomain ||
+    (projectId ? `${projectId.toLowerCase()}.firebaseapp.com` : '');
+  const appId = (
+    extractConfigField(trimmed, 'appId') || String(jsonParsed.appId || '')
+  ).trim();
   const rawDbId =
     (overrideDatabaseId && overrideDatabaseId.trim()) ||
-    String(parsed.firestoreDatabaseId || '').trim();
+    extractConfigField(trimmed, 'firestoreDatabaseId') ||
+    String(jsonParsed.firestoreDatabaseId || '').trim();
   const firestoreDatabaseId =
     rawDbId && rawDbId !== '(default)' && rawDbId !== 'default'
       ? rawDbId
       : undefined;
-  const storageBucket = String(parsed.storageBucket || '').trim() || undefined;
+  const storageBucket =
+    (
+      extractConfigField(trimmed, 'storageBucket') ||
+      String(jsonParsed.storageBucket || '')
+    ).trim() || undefined;
   const messagingSenderId =
-    String(parsed.messagingSenderId || '').trim() || undefined;
+    (
+      extractConfigField(trimmed, 'messagingSenderId') ||
+      String(jsonParsed.messagingSenderId || '')
+    ).trim() || undefined;
 
   if (!apiKey || !projectId || !authDomain || !appId) {
     throw new Error(
-      'Brakuje wymaganych pól w konfiguracji Firebase (wymagane: apiKey, projectId, authDomain, appId).'
+      'Brakuje wymaganych pól w konfiguracji Firebase (wymagane: apiKey, projectId, authDomain, appId). Skopiuj cały blok firebaseConfig prosto z Firebase Console.'
     );
   }
 
@@ -313,8 +321,23 @@ export function clearCustomFirebaseConfig(): void {
 
 export function exportActiveFirebaseConfigJson(): string {
   const cfg = getActiveFirebaseConfig();
-  if (!cfg) return '{}';
-  return JSON.stringify(cfg, null, 2);
+  if (!cfg) return '';
+  const lines = [
+    '{',
+    `  apiKey: "${cfg.apiKey}",`,
+    `  authDomain: "${cfg.authDomain}",`,
+    `  projectId: "${cfg.projectId}",`,
+    ...(cfg.storageBucket ? [`  storageBucket: "${cfg.storageBucket}",`] : []),
+    ...(cfg.messagingSenderId
+      ? [`  messagingSenderId: "${cfg.messagingSenderId}",`]
+      : []),
+    `  appId: "${cfg.appId}"${cfg.firestoreDatabaseId ? ',' : ''}`,
+    ...(cfg.firestoreDatabaseId
+      ? [`  firestoreDatabaseId: "${cfg.firestoreDatabaseId}"`]
+      : []),
+    '};',
+  ];
+  return lines.join('\n');
 }
 
 export let firebaseApp: FirebaseApp | null = null;
