@@ -14,7 +14,6 @@ import {
   KeyRound,
   Link2,
   AlertTriangle,
-  Sparkles,
   Copy,
   Check,
   Cloud,
@@ -23,9 +22,7 @@ import {
   Settings,
 } from 'lucide-react';
 import {
-  createUserWithEmailAndPassword,
   onAuthStateChanged,
-  signInWithEmailAndPassword,
   signInWithPopup,
   User as FirebaseUser,
 } from 'firebase/auth';
@@ -33,16 +30,15 @@ import {
   auth,
   clearCustomFirebaseConfig,
   decodeFirebaseConfigFromInviteUrl,
-  ensureFirebaseAuthSession,
   getDeviceInstanceRole,
   getFirebaseProjectInfo,
-  getStoredCustomFirebaseConfig,
   googleProvider,
   isFirebaseConfigured,
   parseAndValidateFirebaseConfigInput,
   PWA_HANDOFF_CACHE_NAME,
   saveCustomFirebaseConfigAsAdmin,
   saveCustomFirebaseConfigAsMember,
+  setDeviceInstanceRole,
 } from '../lib/firebase';
 import { verifyInvitationTokenInFirestore } from '../lib/firestoreVaultService';
 import {
@@ -309,7 +305,6 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const [adminMasterPasswordInput, setAdminMasterPasswordInput] = useState('');
   const [copiedCustomLink, setCopiedCustomLink] = useState(false);
 
-  
   // Strict PWA-only enforcement outside AI Studio (GATEKEEP 1)
   const isRunningInInstalledPwa =
     isPWAInstalled || detectedDevice.clientMode === 'pwa';
@@ -333,7 +328,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
           const { inviteToken: urlInvite, fbParam: urlFb } =
             extractInviteAndFbFromInput(window.location.search);
 
-          if (urlFb) {
+          if (urlFb && !isAiStudioPreview) {
             const decodedCfg = decodeFirebaseConfigFromInviteUrl(urlFb);
             if (decodedCfg) {
               saveCustomFirebaseConfigAsMember(decodedCfg);
@@ -353,6 +348,16 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
             }
             return;
           }
+        }
+
+        // If this device is already configured as an Admin instance (e.g. after uploading firebase-config.json or in AI Studio Dev),
+        // never let a stale CacheStorage handoff overwrite the Admin view into Member mode!
+        if (getDeviceInstanceRole() === 'admin' || isAiStudioPreview) {
+          await clearInviteTokenHandoff();
+          if (active) {
+            setDeviceRole('admin');
+          }
+          return;
         }
 
         const restored = await loadInviteAndFbFromPwaHandoff();
@@ -483,6 +488,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         text,
         customDatabaseIdInput
       );
+      clearInviteFromUrlAndState();
       saveCustomFirebaseConfigAsAdmin(validated);
       setFirebaseReady(true);
       setDeviceRole('admin');
@@ -507,6 +513,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         rawFirebaseJsonInput,
         customDatabaseIdInput
       );
+      clearInviteFromUrlAndState();
       saveCustomFirebaseConfigAsAdmin(validated);
       setFirebaseReady(true);
       setDeviceRole('admin');
@@ -1057,7 +1064,6 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     }
   };
 
-  
   const handleFamilyLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -1165,13 +1171,14 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
 
   const fbInfo = getFirebaseProjectInfo();
 
-  // Determine whether this device is operating in Family Member mode (Zero Admin UI) or Admin Instance mode
+  // Determine whether this device is operating in Family Member mode (Zero Admin UI) or Admin Instance mode.
+  // If the vault has not been initialized yet (!isVaultInitialized) and there is no active invite link,
+  // always display the Admin Google initialization view so the Admin can create the vault!
   const isFamilyMemberMode =
-    Boolean(inviteToken) || deviceRole === 'member';
+    Boolean(inviteToken) || (deviceRole === 'member' && isVaultInitialized);
 
   return (
     <div className="max-w-lg mx-auto my-4 space-y-6">
-      
       {/* MAIN PAGE QUICK ACTION BAR: PWA Status + Update */}
       {renderTopPwaUpdateBar()}
 
@@ -1522,6 +1529,21 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                   </button>
                 </form>
               )}
+
+              <div className="pt-2 border-t border-[var(--vault-border)] flex flex-wrap items-center justify-between gap-2 text-[var(--vault-muted)]">
+                <span>Jesteś Administratorem skarbca?</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearInviteFromUrlAndState();
+                    setDeviceInstanceRole('admin');
+                    setDeviceRole('admin');
+                  }}
+                  className="text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer"
+                >
+                  Przełącz na logowanie Google Administratora
+                </button>
+              </div>
             </div>
           </div>
         </>
@@ -1707,17 +1729,34 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                   : 'Logowanie awaryjne loginem i hasłem'}
               </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  clearCustomFirebaseConfig();
-                  setFirebaseReady(isFirebaseConfigured());
-                  setShowChangeFirebaseConfigModal(true);
-                }}
-                className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
-              >
-                Wgraj inny plik JSON Firebase
-              </button>
+              <div className="flex flex-wrap items-center gap-3">
+                {isVaultInitialized && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDeviceInstanceRole('member');
+                      setDeviceRole('member');
+                    }}
+                    className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
+                  >
+                    Widok Domownika
+                  </button>
+                )}
+
+                {!isAiStudioPreview && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearCustomFirebaseConfig();
+                      setFirebaseReady(isFirebaseConfigured());
+                      setShowChangeFirebaseConfigModal(true);
+                    }}
+                    className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
+                  >
+                    Wgraj inny plik JSON Firebase
+                  </button>
+                )}
+              </div>
             </div>
 
             {showAdminFallbackPasswordLogin && (

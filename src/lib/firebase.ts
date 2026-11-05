@@ -194,6 +194,12 @@ export function parseAndValidateFirebaseConfigInput(
 export function getDeviceInstanceRole(): DeviceInstanceRole | null {
   if (typeof window === 'undefined') return null;
   try {
+    if (
+      isAiStudioRuntime() &&
+      !window.location.search.includes('invite=')
+    ) {
+      return 'admin';
+    }
     const val = localStorage.getItem(DEVICE_INSTANCE_ROLE_KEY);
     if (val === 'admin' || val === 'member') return val;
   } catch {
@@ -216,7 +222,7 @@ function captureUrlInviteFirebaseConfigOnBoot(): CustomFirebaseConfig | null {
   try {
     const params = new URLSearchParams(window.location.search);
     const fbParam = params.get('fb');
-    if (fbParam) {
+    if (fbParam && !isAiStudioRuntime()) {
       const decoded = decodeFirebaseConfigFromInviteUrl(fbParam);
       if (decoded) {
         localStorage.setItem(
@@ -255,20 +261,15 @@ export function getStoredCustomFirebaseConfig(): CustomFirebaseConfig | null {
 }
 
 export function getActiveFirebaseConfig(): CustomFirebaseConfig | null {
-  const custom = getStoredCustomFirebaseConfig();
-  if (custom) return custom;
-
-  // In Google AI Studio preview, allow using the local bundled firebase-applet-config.json
+  // 1. DEV ENVIRONMENT (Google AI Studio Preview / localhost):
+  // Always use the bundled test Firebase project (true-deployment-mfx4d)
   if (isAiStudioRuntime() && isValidConfigObject(bundledConfig)) {
     return bundledConfig;
   }
 
-  // If bundled config exists (e.g. local dev), check if it's non-empty
-  if (isValidConfigObject(bundledConfig)) {
-    return bundledConfig;
-  }
-
-  return null;
+  // 2. PRODUCTION ENVIRONMENT (GitHub Pages PWA):
+  // Strictly use the locally uploaded JSON config (e.g. familypwdvault) or invite config
+  return getStoredCustomFirebaseConfig();
 }
 
 export function isFirebaseConfigured(): boolean {
