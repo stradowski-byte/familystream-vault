@@ -30,6 +30,8 @@ import {
   auth,
   clearCustomFirebaseConfig,
   decodeFirebaseConfigFromInviteUrl,
+  diagnoseFirebaseAuthConfiguration,
+  exportActiveFirebaseConfigJson,
   getDeviceInstanceRole,
   getFirebaseProjectInfo,
   googleProvider,
@@ -1057,10 +1059,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         rawMessage.includes('auth/configuration-not-found') ||
         rawMessage.includes('auth/operation-not-allowed')
       ) {
-        const proj = getFirebaseProjectInfo().projectId;
-        setErrorMsg(
-          `W projekcie Firebase (${proj}) nie włączono jeszcze logowania w module Authentication. W konsoli Firebase wybierz projekt ${proj} → Build → Authentication → Sign-in method i włącz dostawców „Google” oraz „Anonymous” (oraz upewnij się, że w Settings → Authorized domains dodana jest domena stradowski-byte.github.io).`
-        );
+        const diagnosticMessage = await diagnoseFirebaseAuthConfiguration();
+        setErrorMsg(diagnosticMessage);
       } else if (code === 'auth/popup-closed-by-user' || rawMessage.includes('auth/popup-closed-by-user')) {
         setErrorMsg('Zamknięto okno logowania Google przed wyborem konta.');
       } else {
@@ -1573,12 +1573,17 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
               </span>
               <button
                 type="button"
-                onClick={() => setShowChangeFirebaseConfigModal(true)}
+                onClick={() => {
+                  setRawFirebaseJsonInput(exportActiveFirebaseConfigJson());
+                  setShowChangeFirebaseConfigModal(true);
+                }}
                 className="inline-flex items-center gap-1 text-[11px] font-mono text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer"
                 title="Zmień lub podglądnij załadowany config Firebase JSON"
               >
                 <Settings className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
-                <span>{fbInfo.projectId}</span>
+                <span>
+                  {fbInfo.projectId} · {fbInfo.apiKeyMasked}
+                </span>
               </button>
             </div>
 
@@ -1758,13 +1763,12 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      clearCustomFirebaseConfig();
-                      setFirebaseReady(isFirebaseConfigured());
+                      setRawFirebaseJsonInput(exportActiveFirebaseConfigJson());
                       setShowChangeFirebaseConfigModal(true);
                     }}
                     className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] underline cursor-pointer"
                   >
-                    Wgraj inny plik JSON Firebase
+                    Sprawdź / wgraj inny plik JSON Firebase
                   </button>
                 )}
               </div>

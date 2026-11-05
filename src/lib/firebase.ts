@@ -162,14 +162,20 @@ export function parseAndValidateFirebaseConfigInput(
 
   const apiKey = String(parsed.apiKey || '').trim();
   const projectId = String(parsed.projectId || '').trim();
+  const rawAuthDomain = String(parsed.authDomain || '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/\/+$/, '');
   const authDomain =
-    String(parsed.authDomain || '').trim() ||
-    (projectId ? `${projectId}.firebaseapp.com` : '');
+    rawAuthDomain || (projectId ? `${projectId.toLowerCase()}.firebaseapp.com` : '');
   const appId = String(parsed.appId || '').trim();
-  const firestoreDatabaseId =
+  const rawDbId =
     (overrideDatabaseId && overrideDatabaseId.trim()) ||
-    String(parsed.firestoreDatabaseId || '').trim() ||
-    undefined;
+    String(parsed.firestoreDatabaseId || '').trim();
+  const firestoreDatabaseId =
+    rawDbId && rawDbId !== '(default)' && rawDbId !== 'default'
+      ? rawDbId
+      : undefined;
   const storageBucket = String(parsed.storageBucket || '').trim() || undefined;
   const messagingSenderId =
     String(parsed.messagingSenderId || '').trim() || undefined;
@@ -322,7 +328,8 @@ function initializeOrUpdateFirebaseInstances(
   if (!cfg) return false;
   try {
     const existingApps = getApps();
-    const appName = `fsv-${cfg.projectId}-${cfg.firestoreDatabaseId || 'default'}`;
+    const keyFingerprint = cfg.apiKey ? cfg.apiKey.slice(-6) : 'nokey';
+    const appName = `fsv-${cfg.projectId}-${cfg.firestoreDatabaseId || 'default'}-${keyFingerprint}`;
     const existing = existingApps.find((a) => a.name === appName);
     firebaseApp = existing || initializeApp(cfg, appName);
 
@@ -351,15 +358,91 @@ export function getFirebaseProjectInfo(): {
   projectId: string;
   databaseId: string;
   authDomain: string;
+  apiKeyMasked: string;
+  appId: string;
   isConfigured: boolean;
 } {
   const cfg = getActiveFirebaseConfig();
+  const key = cfg?.apiKey || '';
+  const apiKeyMasked =
+    key.length > 12 ? `${key.slice(0, 8)}...${key.slice(-4)}` : key || '—';
   return {
     projectId: cfg?.projectId || 'Brak (oczekuje na wgranie JSON)',
     databaseId: cfg?.firestoreDatabaseId || '(default)',
     authDomain: cfg?.authDomain || '—',
+    apiKeyMasked,
+    appId: cfg?.appId || '—',
     isConfigured: Boolean(cfg),
   };
+}
+
+export async function diagnoseFirebaseAuthConfiguration(): Promise<string> {
+  const cfg = getActiveFirebaseConfig();
+  if (!cfg) {
+    return 'Brak załadowanej konfiguracji Firebase JSON.';
+  }
+
+  const keyMasked =
+    cfg.apiKey.length > 12
+      ? `${cfg.apiKey.slice(0, 8)}...${cfg.apiKey.slice(-4)}`
+      : cfg.apiKey;
+
+  // 1. Check if the user accidentally used the bundled test project's apiKey with a custom projectId
+  if (
+    bundledConfig?.apiKey &&
+    cfg.apiKey === bundledConfig.apiKey &&
+    cfg.projectId.toLowerCase() !== (bundledConfig.projectId || '').toLowerCase()
+  ) {
+    return `Wykryto niezgodność klucza w wgranym pliku JSON: pole projectId to „${cfg.projectId}”, ale klucz apiKey (${keyMasked}) pochodzi z projektu testowego „${bundledConfig.projectId}”. Wejdź w konsoli Firebase w projekt „${cfg.projectId}” → Koło zębate (⚙️) → Project settings → General → na samym dole w sekcji „Your apps” skopiuj firebaseConfig swojej aplikacji Web (</>) i wgraj poprawny JSON.`;
+  }
+
+  // 2. Query Google Identity Toolkit getProjectConfig for this apiKey to verify which project it belongs to
+  try {
+    const resp = await fetch(
+      `https://www.googleapis.com/identitytoolkit/v3/relyingparty/getProjectConfig?key=${encodeURIComponent(
+        cfg.apiKey
+      )}`
+    );
+    const data = (await resp.json()) as {
+      projectId?: string;
+      authorizedDomains?: string[];
+      error?: { message?: string };
+    };
+
+    if (!resp.ok) {
+      const apiErr = data?.error?.message || '';
+      if (apiErr.includes('CONFIGURATION_NOT_FOUND')) {
+        return `Serwer Google Identity Toolkit zwrócił CONFIGURATION_NOT_FOUND dla klucza apiKey (${keyMasked}) w projekcie „${cfg.projectId}”. Oznacza to jedno z dwóch: (1) W konsoli Firebase projektu „${cfg.projectId}” wejdź w Authentication → Sign-in method → kliknij ikonę ołówka (✏️) przy „Google”, wybierz swój adres Gmail na liście „Project support email” i kliknij „Save” (lub wyłącz Google → Save → włącz ponownie → wybierz e-mail wsparcia → Save), ALBO (2) klucz apiKey (${keyMasked}) w pliku JSON pochodzi z innego projektu niż „${cfg.projectId}” (sprawdź Project settings ⚙️ → General → Your apps).`;
+      }
+      if (apiErr.includes('API_KEY_INVALID')) {
+        return `Klucz apiKey (${keyMasked}) w wgranym pliku JSON jest nieprawidłowy (API_KEY_INVALID). Skopiuj dokładny obiekt firebaseConfig z Project settings (⚙️) → General → Your apps w projekcie „${cfg.projectId}”.`;
+      }
+    } else if (Array.isArray(data.authorizedDomains)) {
+      const firebaseAppDomain = data.authorizedDomains.find((d) =>
+        d.endsWith('.firebaseapp.com')
+      );
+      const actualProjectSlug = firebaseAppDomain
+        ? firebaseAppDomain.replace('.firebaseapp.com', '')
+        : null;
+
+      if (
+        actualProjectSlug &&
+        actualProjectSlug.toLowerCase() !== cfg.projectId.toLowerCase()
+      ) {
+        return `Wykryto przyczynę błędu: Klucz apiKey (${keyMasked}) w Twoim pliku JSON należy do projektu „${actualProjectSlug}”, a nie do „${cfg.projectId}”! Dlatego logowanie zwraca auth/configuration-not-found. Wejdź w Firebase Console w projekt „${cfg.projectId}” → Koło zębate (⚙️) → Project settings → General → sekcja Your apps i skopiuj właściwy klucz apiKey oraz appId dla projektu „${cfg.projectId}”.`;
+      }
+
+      const currentHost =
+        typeof window !== 'undefined' ? window.location.hostname : '';
+      if (currentHost && !data.authorizedDomains.includes(currentHost)) {
+        return `Domena „${currentHost}” nie znajduje się na liście autoryzowanych domen dla klucza apiKey (${keyMasked}, projekt: ${actualProjectSlug || cfg.projectId}). Dodaj „${currentHost}” w Authentication → Settings → Authorized domains.`;
+      }
+    }
+  } catch {
+    // ignore network check error and fall back to detailed message
+  }
+
+  return `Błąd auth/configuration-not-found dla projektu „${cfg.projectId}” (załadowany apiKey: ${keyMasked}, authDomain: ${cfg.authDomain}). W konsoli Firebase projektu „${cfg.projectId}” wejdź w Authentication → Sign-in method → kliknij ikonę ołówka (✏️) przy „Google”, upewnij się że wybrano „Project support email” i kliknij „Save” (jeśli jest już włączone: wyłącz Google → Save → włącz ponownie z e-mailem wsparcia → Save). Upewnij się też, że w Project settings (⚙️) → General → Your apps zarejestrowano aplikację Web (</>) i wgrano jej dokładny apiKey.`;
 }
 
 export const FIREBASE_PROJECT_ID = initialConfig?.projectId || '';
