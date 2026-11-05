@@ -23,10 +23,8 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() &&
-             exists(/databases/$(database)/documents/vaultConfig/default) && (
-               get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == request.auth.uid ||
-               get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == 'aistudio_preview_admin'
-             );
+             exists(/databases/$(database)/documents/vaultConfig/default) &&
+             get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == request.auth.uid;
     }
 
     function isMemberOwner(memberId) {
@@ -56,7 +54,7 @@ service cloud.firestore {
     function isValidMember(data) {
       return data.keys().hasAll(['id', 'fullName', 'username', 'passwordHash', 'pbkdf2Salt', 'wrappedMasterKey', 'vaultEscrowKey', 'mergedVaultKeysJson', 'role', 'status', 'googleUid', 'createdAt', 'updatedAt']) &&
       data.keys().hasOnly(['id', 'fullName', 'username', 'passwordHash', 'pbkdf2Salt', 'wrappedMasterKey', 'vaultEscrowKey', 'mergedVaultKeysJson', 'role', 'coAdminPermissions', 'status', 'googleUid', 'invitedByToken', 'createdAt', 'updatedAt']) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 && data.username is string && data.username.size() >= 1 && data.username.size() <= 80 && data.passwordHash is string && data.passwordHash.size() <= 512 && data.pbkdf2Salt is string && data.pbkdf2Salt.size() <= 256 && data.wrappedMasterKey is string && data.wrappedMasterKey.size() <= 2048 && data.vaultEscrowKey is string && data.vaultEscrowKey.size() <= 2048 && data.mergedVaultKeysJson is string && data.mergedVaultKeysJson.size() <= 20000 && data.role in ['admin', 'co_admin', 'member'] && data.status in ['active', 'pending', 'merged'] && data.googleUid is string && data.googleUid.size() <= 256 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64;
+      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 && data.username is string && data.username.size() >= 1 && data.username.size() <= 80 && data.passwordHash is string && data.passwordHash.size() <= 512 && data.passwordHash.size() >= 1 && data.pbkdf2Salt is string && data.pbkdf2Salt.size() <= 256 && data.wrappedMasterKey is string && data.wrappedMasterKey.size() <= 2048 && data.vaultEscrowKey is string && data.vaultEscrowKey.size() <= 2048 && data.mergedVaultKeysJson is string && data.mergedVaultKeysJson.size() <= 20000 && data.role in ['admin', 'co_admin', 'member'] && data.status in ['active', 'pending', 'merged'] && data.googleUid is string && data.googleUid.size() <= 256 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64;
     }
 
     function isValidDevice(data) {
@@ -91,11 +89,10 @@ service cloud.firestore {
                     !exists(/databases/$(database)/documents/vaultConfig/default) &&
                     isValidVaultConfig(incoming()) &&
                     incoming().adminUid == request.auth.uid;
-      allow update: if isSignedIn() &&
+      allow update: if isAdmin() &&
                     isValidId(configId) &&
                     isValidVaultConfig(incoming()) &&
-                    (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt) &&
-                    (isAdmin() || incoming().adminUid == request.auth.uid);
+                    (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
       allow delete: if isAdmin() && isValidId(configId);
     }
 
@@ -108,10 +105,10 @@ service cloud.firestore {
                     isValidMember(incoming()) &&
                     (!('id' in existing()) || incoming().id == existing().id) && (
                       isAdmin() ||
-                      existing().googleUid == request.auth.uid ||
-                      existing().id == request.auth.uid ||
-                      (existing().googleUid == '' && incoming().googleUid == request.auth.uid) ||
-                      (incoming().role == 'admin' && incoming().googleUid == request.auth.uid)
+                      (
+                        (existing().googleUid == request.auth.uid || existing().id == request.auth.uid || (existing().googleUid == '' && incoming().googleUid == request.auth.uid)) &&
+                        incoming().role == existing().role
+                      )
                     );
       allow delete: if isSignedIn() && isValidId(memberId) && (isAdmin() || existing().googleUid == request.auth.uid || existing().id == request.auth.uid);
     }
@@ -120,7 +117,7 @@ service cloud.firestore {
       allow get: if isSignedIn() && isValidId(deviceId);
       allow list: if isSignedIn() && request.time != null;
       allow create: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == deviceId;
-      allow update: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && (!('id' in existing()) || incoming().id == existing().id) && (isAdmin() || isMemberOwner(existing().memberId) || isMemberOwner(incoming().memberId));
+      allow update: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && (!('id' in existing()) || incoming().id == existing().id) && (isAdmin() || isMemberOwner(existing().memberId));
       allow delete: if isSignedIn() && isValidId(deviceId) && (isAdmin() || isMemberOwner(existing().memberId));
     }
 
