@@ -13,7 +13,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   auth,
   db,
@@ -195,7 +195,7 @@ export function subscribeToVaultFirestoreRealtime(
   }
 
   let snapshotUnsubscribers: Unsubscribe[] = [];
-  let attachedUid: string | null = null;
+  let attachedSessionKey: string | null = null;
   let initialConfigLoaded = false;
   let initialMembersLoaded = false;
   let notifiedInitial = false;
@@ -211,13 +211,15 @@ export function subscribeToVaultFirestoreRealtime(
   const detachSnapshots = () => {
     snapshotUnsubscribers.forEach((u) => u());
     snapshotUnsubscribers = [];
-    attachedUid = null;
+    attachedSessionKey = null;
   };
 
-  const attachSnapshotsForUser = (uid: string) => {
-    if (isDisposed || attachedUid === uid) return;
+  const attachSnapshotsForUser = (user: User) => {
+    const isGoogleAdminUser = !user.isAnonymous && Boolean(user.emailVerified);
+    const sessionKey = `${user.uid}:${isGoogleAdminUser ? 'admin' : 'member'}`;
+    if (isDisposed || attachedSessionKey === sessionKey) return;
     detachSnapshots();
-    attachedUid = uid;
+    attachedSessionKey = sessionKey;
 
     // 1. /vaultConfig/default
     snapshotUnsubscribers.push(
@@ -285,9 +287,16 @@ export function subscribeToVaultFirestoreRealtime(
     );
 
     // 4. /passwords (E2E AES-256-GCM encrypted records)
+    // Google Admin lists all records; Family Members list only records where request.auth.uid is in allowedMemberIds
+    const passwordsRefOrQuery = isGoogleAdminUser
+      ? collection(db, 'passwords')
+      : query(
+          collection(db, 'passwords'),
+          where('allowedMemberIds', 'array-contains', user.uid)
+        );
     snapshotUnsubscribers.push(
       onSnapshot(
-        collection(db, 'passwords'),
+        passwordsRefOrQuery,
         (snap) => {
           const list = snap.docs.map((d) => ({
             ...(d.data() as PasswordRecord),
@@ -322,36 +331,40 @@ export function subscribeToVaultFirestoreRealtime(
       )
     );
 
-    // 6. /activityLogs
-    const logsQuery = query(
-      collection(db, 'activityLogs'),
-      orderBy('timestamp', 'desc'),
-      limit(150)
-    );
-    snapshotUnsubscribers.push(
-      onSnapshot(
-        logsQuery,
-        (snap) => {
-          const list = snap.docs.map((d) => ({
-            ...(d.data() as ActivityLog),
-            id: d.id,
-          }));
-          callbacks.onActivityLogs(list);
-        },
-        (err) => {
-          if (auth.currentUser) {
-            handleFirestoreError(err, OperationType.LIST, 'activityLogs');
+    // 6. /activityLogs (Strictly restricted to Administrator in firestore.rules)
+    if (isGoogleAdminUser) {
+      const logsQuery = query(
+        collection(db, 'activityLogs'),
+        orderBy('timestamp', 'desc'),
+        limit(150)
+      );
+      snapshotUnsubscribers.push(
+        onSnapshot(
+          logsQuery,
+          (snap) => {
+            const list = snap.docs.map((d) => ({
+              ...(d.data() as ActivityLog),
+              id: d.id,
+            }));
+            callbacks.onActivityLogs(list);
+          },
+          (err) => {
+            if (auth.currentUser) {
+              handleFirestoreError(err, OperationType.LIST, 'activityLogs');
+            }
           }
-        }
-      )
-    );
+        )
+      );
+    } else {
+      callbacks.onActivityLogs([]);
+    }
   };
 
   // Listen to Firebase Auth state changes (Google Auth or Anonymous Auth)
   const unsubAuth = onAuthStateChanged(auth, (user) => {
     if (isDisposed) return;
     if (user) {
-      attachSnapshotsForUser(user.uid);
+      attachSnapshotsForUser(user);
     } else {
       detachSnapshots();
     }
@@ -361,7 +374,7 @@ export function subscribeToVaultFirestoreRealtime(
   void ensureFirebaseAuthSession(false).then((user) => {
     if (isDisposed) return;
     if (user) {
-      attachSnapshotsForUser(user.uid);
+      attachSnapshotsForUser(user);
     } else {
       // If no session could be established yet (e.g., waiting for Admin Google Login), allow UI to render
       initialConfigLoaded = true;
@@ -908,9 +921,19 @@ export async function mergeMembersInFirestore(params: {
 
     for (const p of params.passwords) {
       if (p.ownerId === params.sourceMemberId) {
+        const mergedAllowed = Array.from(
+          new Set(
+            [
+              ...(p.allowedMemberIds || []),
+              params.targetMemberId,
+              targetData.googleUid || '',
+            ].filter(Boolean)
+          )
+        );
         batch.set(doc(db, 'passwords', p.id), {
           ...p,
           ownerId: params.targetMemberId,
+          allowedMemberIds: mergedAllowed,
           updatedAt: now,
         });
       }

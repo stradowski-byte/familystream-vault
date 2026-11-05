@@ -1395,6 +1395,66 @@ export default function App() {
     );
   };
 
+  // Synchronize allowedMemberIds with both member.id and member.googleUid (request.auth.uid)
+  // so Firestore `where('allowedMemberIds', 'array-contains', request.auth.uid)` queries work for all family members
+  const expandAllowedMemberIdsWithAuthUids = useCallback(
+    (rawMemberIds: string[], ownerMemberId?: string): string[] => {
+      const baseIds = new Set<string>(rawMemberIds.filter(Boolean));
+      if (ownerMemberId) {
+        baseIds.add(ownerMemberId);
+      }
+      for (const m of members) {
+        if (baseIds.has(m.id) || (m.googleUid && baseIds.has(m.googleUid))) {
+          baseIds.add(m.id);
+          if (m.googleUid) {
+            baseIds.add(m.googleUid);
+          }
+        }
+      }
+      if (
+        ownerMemberId &&
+        currentMember &&
+        ownerMemberId === currentMember.id &&
+        auth?.currentUser?.uid
+      ) {
+        baseIds.add(auth.currentUser.uid);
+      }
+      return Array.from(baseIds);
+    },
+    [members, currentMember]
+  );
+
+  // Self-healing sync: when Admin or record owner is active, ensure every password's allowedMemberIds
+  // includes the bound Firebase Auth UID (member.googleUid) for the owner and all permitted members
+  useEffect(() => {
+    if (!currentMember || passwords.length === 0 || members.length === 0) return;
+    const isAdminActor = isPrimaryAdmin(currentMember);
+
+    for (const rec of passwords) {
+      const canActorUpdate = isAdminActor || rec.ownerId === currentMember.id;
+      if (!canActorUpdate) continue;
+
+      const expanded = expandAllowedMemberIdsWithAuthUids(
+        rec.allowedMemberIds || [],
+        rec.ownerId
+      );
+      const currentSet = new Set(rec.allowedMemberIds || []);
+      const hasMissingAuthUid = expanded.some((id) => !currentSet.has(id));
+
+      if (hasMissingAuthUid) {
+        void savePasswordToFirestore(rec.id, {
+          allowedMemberIds: expanded,
+        });
+      }
+    }
+  }, [
+    currentMember,
+    passwords,
+    members,
+    isPrimaryAdmin,
+    expandAllowedMemberIdsWithAuthUids,
+  ]);
+
   // 6. PASSWORD CRUD & SUB-ACCOUNTS (E2E Encryption before setDoc in Firestore)
   const handleAddPassword = async (params: {
     section: 'shared' | 'private';
@@ -1438,7 +1498,10 @@ export default function App() {
         keySalt: currentMember.pbkdf2Salt,
         ownerId: currentMember.id,
         ownerName: currentMember.fullName,
-        allowedMemberIds: [currentMember.id],
+        allowedMemberIds: expandAllowedMemberIdsWithAuthUids(
+          [currentMember.id],
+          currentMember.id
+        ),
         revealToAdmin: shouldReveal,
         subAccountsJson: '[]',
         createdAt: now,
@@ -1449,8 +1512,9 @@ export default function App() {
     } else {
       const subList = params.subAccounts || [];
       const subMemberIds = subList.map((s) => s.assignedMemberId);
-      const mergedAllowed = Array.from(
-        new Set([...params.allowedMemberIds, ...subMemberIds, currentMember.id])
+      const mergedAllowed = expandAllowedMemberIdsWithAuthUids(
+        [...params.allowedMemberIds, ...subMemberIds, currentMember.id],
+        currentMember.id
       );
       const record: PasswordRecord = {
         id: pwId,
@@ -1494,11 +1558,13 @@ export default function App() {
   ) => {
     if (!currentMember) return;
     const now = new Date().toISOString();
-    const nextAllowed = additionalAllowedMemberId
-      ? Array.from(
-          new Set([...record.allowedMemberIds, additionalAllowedMemberId])
-        )
+    const rawAllowed = additionalAllowedMemberId
+      ? [...record.allowedMemberIds, additionalAllowedMemberId]
       : record.allowedMemberIds;
+    const nextAllowed = expandAllowedMemberIdsWithAuthUids(
+      rawAllowed,
+      record.ownerId
+    );
 
     await savePasswordToFirestore(record.id, {
       subAccountsJson: JSON.stringify(nextSubAccounts),
@@ -1607,8 +1673,12 @@ export default function App() {
   ) => {
     if (!currentMember) return;
     const now = new Date().toISOString();
+    const expandedIds = expandAllowedMemberIdsWithAuthUids(
+      memberIds,
+      record.ownerId
+    );
     await savePasswordToFirestore(record.id, {
-      allowedMemberIds: memberIds,
+      allowedMemberIds: expandedIds,
       updatedAt: now,
     });
     await logActivityInFirestore(
