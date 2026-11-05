@@ -1041,7 +1041,8 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       });
     } catch (err) {
       const code = (err as { code?: string })?.code || '';
-      if (code === 'auth/unauthorized-domain') {
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      if (code === 'auth/unauthorized-domain' || rawMessage.includes('auth/unauthorized-domain')) {
         const host =
           typeof window !== 'undefined'
             ? window.location.hostname
@@ -1050,7 +1051,17 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
         setErrorMsg(
           `Domena „${host}” nie jest jeszcze dodana do autoryzowanych domen w Firebase Auth. Dodaj ją w Firebase Console -> Authentication -> Settings -> Authorized domains.`
         );
-      } else if (code === 'auth/popup-closed-by-user') {
+      } else if (
+        code === 'auth/configuration-not-found' ||
+        code === 'auth/operation-not-allowed' ||
+        rawMessage.includes('auth/configuration-not-found') ||
+        rawMessage.includes('auth/operation-not-allowed')
+      ) {
+        const proj = getFirebaseProjectInfo().projectId;
+        setErrorMsg(
+          `W projekcie Firebase (${proj}) nie włączono jeszcze logowania w module Authentication. W konsoli Firebase wybierz projekt ${proj} → Build → Authentication → Sign-in method i włącz dostawców „Google” oraz „Anonymous” (oraz upewnij się, że w Settings → Authorized domains dodana jest domena stradowski-byte.github.io).`
+        );
+      } else if (code === 'auth/popup-closed-by-user' || rawMessage.includes('auth/popup-closed-by-user')) {
         setErrorMsg('Zamknięto okno logowania Google przed wyborem konta.');
       } else {
         setErrorMsg(

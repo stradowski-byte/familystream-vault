@@ -373,8 +373,10 @@ export function isAnonymousAuthDisabledError(err: unknown): boolean {
   const code = (err as { code?: string })?.code || '';
   const msg = err instanceof Error ? err.message : String(err);
   return (
+    code === 'auth/configuration-not-found' ||
     code === 'auth/operation-not-allowed' ||
     code === 'auth/admin-restricted-operation' ||
+    msg.includes('auth/configuration-not-found') ||
     msg.includes('auth/operation-not-allowed') ||
     msg.includes('auth/admin-restricted-operation')
   );
@@ -413,7 +415,7 @@ export async function ensureFirebaseAuthSession(
       if (throwIfAnonymousDisabled && isAnonymousAuthDisabledError(err)) {
         const proj = getActiveFirebaseConfig()?.projectId || 'twoj-projekt';
         throw new Error(
-          `W Twoim projekcie Firebase (${proj}) nie włączono jeszcze opcji „Anonymous” dla urządzeń domowników. Wejdź w Firebase Console -> Authentication -> Sign-in method -> Anonymous -> Enable i kliknij Save.`
+          `W projekcie Firebase (${proj}) nie włączono jeszcze modułu Authentication (Sign-in method). Wejdź w konsoli Firebase w projekt ${proj} → Build → Authentication → zakładka Sign-in method i włącz dostawców „Google” oraz „Anonymous”.`
         );
       }
       return auth.currentUser;
