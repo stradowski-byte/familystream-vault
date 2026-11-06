@@ -877,6 +877,11 @@ export async function verifyInvitationTokenInFirestore(
 ): Promise<VaultInvitation> {
   const cleanToken = token.trim();
   const path = 'invitations';
+  if (!isFirebaseConfigured() || !db) {
+    throw new Error(
+      'Brak skonfigurowanego połączenia z bazą Firebase na tym urządzeniu. Otwórz pełny link zaproszeniowy zawierający parametr „&fb=...” od Administratora.'
+    );
+  }
   try {
     const user = await ensureFirebaseAuthSession(true);
     if (!user) {
@@ -884,25 +889,56 @@ export async function verifyInvitationTokenInFirestore(
         'W projekcie Firebase nie jest jeszcze włączone logowanie „Anonymous” dla urządzeń domowników. Włącz je w Firebase Console -> Authentication -> Sign-in method -> Anonymous -> Enable.'
       );
     }
+
+    let matchedDoc: VaultInvitation | null = null;
+
+    // 1. Primary lookup by token field
     const q = query(
       collection(db, 'invitations'),
       where('token', '==', cleanToken),
       limit(1)
     );
     const snap = await getDocs(q);
-    if (snap.empty) {
+    if (!snap.empty) {
+      matchedDoc = {
+        ...(snap.docs[0].data() as VaultInvitation),
+        id: snap.docs[0].id,
+      };
+    }
+
+    // 2. Fallback lookup across all invitations in case token case/whitespace or id was passed
+    let totalInvitesInDb = snap.size;
+    if (!matchedDoc) {
+      const allSnap = await getDocs(collection(db, 'invitations'));
+      totalInvitesInDb = allSnap.size;
+      const found = allSnap.docs.find((d) => {
+        const data = d.data() as VaultInvitation;
+        return (
+          (data.token &&
+            data.token.trim().toLowerCase() === cleanToken.toLowerCase()) ||
+          d.id.trim().toLowerCase() === cleanToken.toLowerCase()
+        );
+      });
+      if (found) {
+        matchedDoc = {
+          ...(found.data() as VaultInvitation),
+          id: found.id,
+        };
+      }
+    }
+
+    if (!matchedDoc) {
       throw new Error(
-        'Ten link zaproszeniowy nie istnieje w bazie skarbca lub został usunięty.'
+        `Nie znaleziono zaproszenia (${cleanToken}) w bazie Cloud Firestore (liczba zaproszeń w bazie: ${totalInvitesInDb}). Poproś Administratora o skopiowanie aktualnego linku lub kliknij „Ponów weryfikację linku”.`
       );
     }
-    const inv = normalizeInvitationStatuses([
-      snap.docs[0].data() as VaultInvitation,
-    ])[0];
+
+    const inv = normalizeInvitationStatuses([matchedDoc])[0];
     if (inv.status !== 'active') {
       throw new Error(
         inv.status === 'used'
-          ? 'Ten jednorazowy link zaproszeniowy został już wykorzystany.'
-          : 'Ten link zaproszeniowy wygasł.'
+          ? 'Ten jednorazowy link zaproszeniowy został już wykorzystany. Możesz zalogować się poniżej swoim loginem i hasłem.'
+          : 'Ten link zaproszeniowy wygasł. Poproś Administratora o wygenerowanie nowego linku lub zaloguj się poniżej.'
       );
     }
     return inv;
@@ -926,14 +962,36 @@ export async function consumeInvitationTokenInFirestore(
         'W projekcie Firebase nie jest jeszcze włączone logowanie „Anonymous” dla urządzeń domowników. Włącz je w Firebase Console -> Authentication -> Sign-in method -> Anonymous -> Enable.'
       );
     }
+    let inv: VaultInvitation | null = null;
     const q = query(
       collection(db, 'invitations'),
       where('token', '==', cleanToken),
       limit(1)
     );
     const snap = await getDocs(q);
-    if (snap.empty) return null;
-    const inv = snap.docs[0].data() as VaultInvitation;
+    if (!snap.empty) {
+      inv = {
+        ...(snap.docs[0].data() as VaultInvitation),
+        id: snap.docs[0].id,
+      };
+    } else {
+      const allSnap = await getDocs(collection(db, 'invitations'));
+      const found = allSnap.docs.find((d) => {
+        const data = d.data() as VaultInvitation;
+        return (
+          (data.token &&
+            data.token.trim().toLowerCase() === cleanToken.toLowerCase()) ||
+          d.id.trim().toLowerCase() === cleanToken.toLowerCase()
+        );
+      });
+      if (found) {
+        inv = {
+          ...(found.data() as VaultInvitation),
+          id: found.id,
+        };
+      }
+    }
+    if (!inv) return null;
     const nextUsedCount = (inv.usedCount || 0) + 1;
     const nextStatus: VaultInvitation['status'] =
       inv.mode === 'single_use' || nextUsedCount >= inv.maxUses

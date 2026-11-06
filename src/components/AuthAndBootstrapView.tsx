@@ -37,6 +37,7 @@ import {
   googleProvider,
   isFirebaseConfigured,
   parseAndValidateFirebaseConfigInput,
+  PRODUCTION_FIRESTORE_RULES,
   PWA_HANDOFF_CACHE_NAME,
   saveCustomFirebaseConfigAsAdmin,
   saveCustomFirebaseConfigAsMember,
@@ -105,26 +106,42 @@ function extractInviteAndFbFromInput(raw: string): {
 } {
   const trimmed = raw.trim();
   if (!trimmed) return { inviteToken: '', fbParam: '' };
+
+  // 1. Direct regex extraction (handles full URLs, query strings, or URLs embedded inside SMS/WhatsApp messages)
+  const invMatch = trimmed.match(/[?&]invite=([a-zA-Z0-9_-]+)/i);
+  const fbMatch = trimmed.match(/[?&]fb=([a-zA-Z0-9_=-]+)/i);
+  if (invMatch?.[1] || fbMatch?.[1]) {
+    return {
+      inviteToken: invMatch?.[1] ? decodeURIComponent(invMatch[1]).trim() : '',
+      fbParam: fbMatch?.[1] ? decodeURIComponent(fbMatch[1]).trim() : '',
+    };
+  }
+
+  // 2. Fallback URL parsing if a URL object can be constructed
   try {
-    if (trimmed.includes('invite=') || trimmed.includes('fb=')) {
-      const url = new URL(
-        trimmed.startsWith('http')
-          ? trimmed
-          : `https://vault.local/${trimmed.replace(/^\//, '')}`
-      );
+    const urlCandidateMatch = trimmed.match(/https?:\/\/[^\s"'<>]+/i);
+    const targetUrlStr = urlCandidateMatch
+      ? urlCandidateMatch[0]
+      : trimmed.startsWith('http')
+        ? trimmed
+        : `https://vault.local/${trimmed.replace(/^\//, '')}`;
+    if (targetUrlStr.includes('invite=') || targetUrlStr.includes('fb=')) {
+      const url = new URL(targetUrlStr);
       return {
         inviteToken: (url.searchParams.get('invite') || '').trim(),
         fbParam: (url.searchParams.get('fb') || '').trim(),
       };
     }
   } catch {
-    const invMatch = trimmed.match(/[?&]invite=([^&#\s]+)/);
-    const fbMatch = trimmed.match(/[?&]fb=([^&#\s]+)/);
-    return {
-      inviteToken: invMatch?.[1] ? decodeURIComponent(invMatch[1]) : '',
-      fbParam: fbMatch?.[1] ? decodeURIComponent(fbMatch[1]) : '',
-    };
+    // ignore URL parse error
   }
+
+  // 3. Direct token string (e.g. inv_123456...)
+  const directTokenMatch = trimmed.match(/\b(inv_[a-zA-Z0-9_-]+)\b/i);
+  if (directTokenMatch?.[1]) {
+    return { inviteToken: directTokenMatch[1].trim(), fbParam: '' };
+  }
+
   return { inviteToken: trimmed, fbParam: '' };
 }
 
@@ -265,6 +282,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     useState<VaultInvitation | null>(null);
   const [isVerifyingInvite, setIsVerifyingInvite] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
+  const [retryInviteCounter, setRetryInviteCounter] = useState(0);
 
   // Login form state
   const [loginUsername, setLoginUsername] = useState('');
@@ -293,6 +311,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     string | null
   >(null);
   const [copiedDomainHost, setCopiedDomainHost] = useState(false);
+  const [copiedFirestoreRules, setCopiedFirestoreRules] = useState(false);
 
   // Native Firebase Auth Google user state (persisted via browserLocalPersistence)
   const [firebaseAuthUser, setFirebaseAuthUser] = useState<FirebaseUser | null>(
@@ -432,7 +451,7 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [inviteToken, isInitializingHandoff, firebaseReady]);
+  }, [inviteToken, isInitializingHandoff, firebaseReady, retryInviteCounter]);
 
   const clearInviteFromUrlAndState = () => {
     setInviteToken('');
@@ -1183,10 +1202,9 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
   const fbInfo = getFirebaseProjectInfo();
 
   // Determine whether this device is operating in Family Member mode (Zero Admin UI) or Admin Instance mode.
-  // If the vault has not been initialized yet (!isVaultInitialized) and there is no active invite link,
-  // always display the Admin Google initialization view so the Admin can create the vault!
+  // Any device with an invite link or `deviceRole === 'member'` ALWAYS shows the Family Member login & invite UI!
   const isFamilyMemberMode =
-    Boolean(inviteToken) || (deviceRole === 'member' && isVaultInitialized);
+    Boolean(inviteToken) || deviceRole === 'member';
 
   return (
     <div className="max-w-lg mx-auto my-4 space-y-6">
@@ -1199,30 +1217,46 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       {inviteToken && (
         <div className="p-6 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-5">
           {isInitializingHandoff || isVerifyingInvite ? (
-            <div className="py-6 text-center text-xs text-[var(--vault-muted)]">
-              Weryfikacja kryptograficznego linku zaproszeniowego w Cloud Firestore...
+            <div className="py-6 text-center text-xs text-[var(--vault-muted)] flex flex-col items-center gap-2">
+              <RefreshCw className="w-5 h-5 animate-spin text-[var(--vault-accent)]" />
+              <span>
+                Weryfikacja kryptograficznego linku zaproszeniowego w Cloud Firestore ({fbInfo.projectId})...
+              </span>
             </div>
           ) : inviteError || !verifiedInvite ? (
             <div className="space-y-4">
               <div className="flex items-start gap-2.5 text-[var(--vault-danger)]">
                 <AlertTriangle className="w-5 h-5 shrink-0 mt-0.5" />
-                <div className="space-y-1">
+                <div className="space-y-1.5">
                   <h2 className="text-base font-bold font-display text-[var(--vault-text)]">
-                    Link zaproszeniowy jest nieaktywny
+                    Nie udało się zweryfikować linku zaproszeniowego
                   </h2>
-                  <p className="text-xs text-[var(--vault-danger)]">
+                  <p className="text-xs text-[var(--vault-danger)] leading-relaxed">
                     {inviteError ||
-                      'Ten link został już wykorzystany lub stracił ważność. Poproś Administratora o nowy link.'}
+                      'Ten link został już wykorzystany lub stracił ważność. Poproś Administratora o nowy link lub zaloguj się w formularzu poniżej.'}
                   </p>
+                  <div className="p-2.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[11px] font-mono text-[var(--vault-muted)]">
+                    Projekt Firebase: <strong className="text-[var(--vault-text)]">{fbInfo.projectId}</strong> · Token: <strong className="text-[var(--vault-text)]">{inviteToken}</strong>
+                  </div>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={clearInviteFromUrlAndState}
-                className="w-full py-2.5 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-lg cursor-pointer"
-              >
-                Przejdź do ekranu logowania
-              </button>
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRetryInviteCounter((c) => c + 1)}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 py-2.5 px-4 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                  <span>Ponów weryfikację linku</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={clearInviteFromUrlAndState}
+                  className="py-2.5 px-4 text-xs font-medium text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-bg)] rounded-lg cursor-pointer"
+                >
+                  Ukryj komunikat zaproszenia
+                </button>
+              </div>
             </div>
           ) : (
             <form onSubmit={handleInviteSubmit} className="space-y-4">
@@ -1393,9 +1427,9 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
       )}
 
       {/* =====================================================================
-          MODE 2: FAMILY MEMBER SUBSEQUENT LOGIN ("TYLKO LOGIN", ZERO ADMIN UI)
+          MODE 2: FAMILY MEMBER LOGIN FORM (ALWAYS VISIBLE FOR FAMILY MEMBERS)
          ===================================================================== */}
-      {!inviteToken && isFamilyMemberMode && (
+      {isFamilyMemberMode && (
         <>
           {biometricProfile && (
             <div className="p-5 rounded-xl border border-[var(--vault-accent)] bg-[var(--vault-surface)] space-y-3">
@@ -1661,8 +1695,54 @@ export const AuthAndBootstrapView: React.FC<AuthAndBootstrapViewProps> = ({
           )}
 
           {errorMsg && !unauthorizedDomainHost && (
-            <div className="p-3 rounded-lg border border-[var(--vault-danger)] text-xs text-[var(--vault-danger)] break-words">
-              {errorMsg}
+            <div className="p-3.5 rounded-xl border border-[var(--vault-danger)] bg-[var(--vault-bg)] space-y-2.5 text-xs">
+              {errorMsg.includes('Missing or insufficient permissions') ? (
+                <>
+                  <div className="font-semibold text-[var(--vault-danger)]">
+                    Wymagana publikacja reguł bezpieczeństwa w Firestore Database → Rules:
+                  </div>
+                  <p className="text-[var(--vault-muted)] leading-relaxed">
+                    Logowanie Google (<strong>{rememberedAdminEmail || 'Administrator'}</strong>) przeszło pomyślnie! Nowa baza danych w projekcie <code className="font-mono font-bold text-[var(--vault-text)]">{fbInfo.projectId}</code> ma jednak domyślnie zablokowany zapis (<code className="font-mono">allow read, write: if false;</code>). Skopiuj reguły przyciskiem poniżej, wklej je w konsoli Firebase w zakładce <strong>Firestore Database → Rules</strong> i kliknij <strong>Publish</strong>:
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard
+                          .writeText(PRODUCTION_FIRESTORE_RULES)
+                          .catch(() => {});
+                        setCopiedFirestoreRules(true);
+                        setTimeout(() => setCopiedFirestoreRules(false), 3000);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--vault-accent)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] text-[var(--vault-text)] font-semibold cursor-pointer"
+                    >
+                      {copiedFirestoreRules ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-[var(--vault-success)]" />
+                          <span>Skopiowano całe firestore.rules!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                          <span>1. Kopiuj gotowe reguły (firestore.rules)</span>
+                        </>
+                      )}
+                    </button>
+                    <a
+                      href={`https://console.firebase.google.com/project/${fbInfo.projectId}/firestore/databases/-default-/rules`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] text-[#FAF7F2] font-semibold"
+                    >
+                      <span>2. Otwórz Firestore Database → Rules</span>
+                    </a>
+                  </div>
+                </>
+              ) : (
+                <div className="text-[var(--vault-danger)] break-words">
+                  {errorMsg}
+                </div>
+              )}
             </div>
           )}
 

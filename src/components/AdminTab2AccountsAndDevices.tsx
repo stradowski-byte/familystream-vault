@@ -187,21 +187,13 @@ export const AdminTab2AccountsAndDevices: React.FC<
 
   const handleShareInviteUrl = async (inv: VaultInvitation) => {
     const url = buildInviteUrl(inv);
-    const title =
-      inv.purpose === 'account_recovery'
-        ? `Link ratunkowy do skarbca FamilyStream Vault (${inv.targetMemberName || inv.invitedLabel})`
-        : `Zaproszenie do skarbca FamilyStream Vault (${inv.invitedLabel})`;
-    const text =
-      inv.purpose === 'account_recovery'
-        ? `Kliknij ten link, aby ustawić nowe hasło i odblokować swoje konto w skarbcu rodzinnym: ${url}`
-        : `Kliknij ten link, wpisz swoje imię i nazwisko oraz kliknij „Załóż mi konto” w naszym rodzinnym skarbcu haseł: ${url}`;
 
     if (typeof navigator !== 'undefined' && navigator.share) {
       try {
-        await navigator.share({ title, text, url });
+        await navigator.share({ url });
         return;
       } catch {
-        // fallback to clipboard
+        // fallback to clipboard if user cancelled or share failed
       }
     }
     await handleCopyInviteUrl(inv);

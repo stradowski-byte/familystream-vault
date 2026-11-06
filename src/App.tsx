@@ -94,6 +94,20 @@ import { AdminTab3ConfigAndBackup } from './components/AdminTab3ConfigAndBackup'
 import { UserProfileView } from './components/UserProfileView';
 
 const REMEMBERED_SESSION_KEY = 'fsv_remembered_session_v1';
+const DEVICE_THEME_PREFERENCE_KEY = 'fsv_device_theme_preference_v1';
+
+function readStoredDeviceTheme(): ThemeMode | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const saved = window.localStorage.getItem(DEVICE_THEME_PREFERENCE_KEY);
+    if (saved === 'dusk' || saved === 'linen') {
+      return saved;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return null;
+}
 
 interface RememberedVaultSession {
   memberId: string;
@@ -118,8 +132,22 @@ export default function App() {
 
   const detectedDevice = useMemo(() => getDetectedDeviceProfile(), []);
 
-  // Theme state (Low-Contrast: Soft Slate Dusk vs Warm Linen Paper)
-  const [theme, setTheme] = useState<ThemeMode>('dusk');
+  // Theme state persisted per device in localStorage (Soft Slate Dusk vs Warm Linen Paper)
+  const [theme, setTheme] = useState<ThemeMode>(
+    () => readStoredDeviceTheme() || 'dusk'
+  );
+
+  const handleToggleTheme = useCallback(() => {
+    setTheme((prev) => {
+      const next: ThemeMode = prev === 'dusk' ? 'linen' : 'dusk';
+      try {
+        window.localStorage.setItem(DEVICE_THEME_PREFERENCE_KEY, next);
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  }, []);
 
   // Cloud Firestore real-time collections (onSnapshot) & Global Firebase Auth Loading State
   const [firebaseConfigVersion, setFirebaseConfigVersion] = useState(0);
@@ -188,7 +216,7 @@ export default function App() {
     }
   }, []);
 
-  // Sync theme class with documentElement
+  // Sync theme class with documentElement & apply vault defaultTheme ONLY if user hasn't picked a device preference yet
   useEffect(() => {
     const root = document.documentElement;
     if (theme === 'dusk') {
@@ -197,6 +225,13 @@ export default function App() {
       root.classList.remove('dark');
     }
   }, [theme]);
+
+  useEffect(() => {
+    if (!vaultConfig?.defaultTheme) return;
+    if (readStoredDeviceTheme() === null) {
+      setTheme(vaultConfig.defaultTheme);
+    }
+  }, [vaultConfig?.defaultTheme]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
@@ -918,14 +953,41 @@ export default function App() {
     const fbSessionUser = await ensureFirebaseAuthSession(true);
     const activeAuthUid = fbSessionUser?.uid || auth?.currentUser?.uid || '';
 
-    const member = members.find(
+    let effectiveMembers = members;
+    let effectiveDevices = devices;
+    let effectiveConfig = vaultConfig;
+
+    if (
+      effectiveMembers.length === 0 ||
+      !effectiveMembers.some(
+        (m) =>
+          m.username.toLowerCase() === username.toLowerCase() &&
+          m.status !== 'merged'
+      )
+    ) {
+      const liveState = await fetchLiveVaultBootstrapStateFromFirestore();
+      if (liveState.members.length > 0) {
+        effectiveMembers = liveState.members;
+        setMembers(liveState.members);
+      }
+      if (liveState.devices.length > 0) {
+        effectiveDevices = liveState.devices;
+        setDevices(liveState.devices);
+      }
+      if (liveState.vaultConfig) {
+        effectiveConfig = liveState.vaultConfig;
+        setVaultConfig(liveState.vaultConfig);
+      }
+    }
+
+    const member = effectiveMembers.find(
       (m) =>
         m.username.toLowerCase() === username.toLowerCase() &&
         m.status !== 'merged'
     );
     if (!member) {
       throw new Error(
-        'Nie znaleziono konta o podanym loginie w Cloud Firestore. Jeśli nie masz jeszcze konta, poproś Administratora lub Zaufanego Opiekuna o link zaproszeniowy.'
+        `Nie znaleziono konta o loginie „${username}” w Cloud Firestore. Jeśli nie masz jeszcze konta, otwórz link zaproszeniowy powyżej i kliknij „Utwórz konto w skarbcu”.`
       );
     }
 
@@ -958,7 +1020,7 @@ export default function App() {
     }
 
     const existingDevice =
-      devices.find(
+      effectiveDevices.find(
         (d) =>
           d.memberId === member.id &&
           d.deviceFingerprint === detectedDevice.deviceFingerprint
@@ -967,7 +1029,7 @@ export default function App() {
     if (
       member.role === 'admin' ||
       member.username.toLowerCase() === 'admin' ||
-      member.id === vaultConfig?.adminMemberId
+      member.id === effectiveConfig?.adminMemberId
     ) {
       const dekBase64 = await unwrapDekWithPassword(
         member.wrappedMasterKey,
@@ -1168,14 +1230,26 @@ export default function App() {
     password: string;
     setupBiometrics: boolean;
   }) => {
-    const duplicate = members.find(
+    const fbSessionUser = await ensureFirebaseAuthSession(true);
+    const boundAuthUid = fbSessionUser?.uid || auth?.currentUser?.uid || '';
+
+    let effectiveMembers = members;
+    if (effectiveMembers.length === 0) {
+      const liveState = await fetchLiveVaultBootstrapStateFromFirestore();
+      if (liveState.members.length > 0) {
+        effectiveMembers = liveState.members;
+        setMembers(liveState.members);
+      }
+    }
+
+    const duplicate = effectiveMembers.find(
       (m) =>
         m.username.toLowerCase() === params.username.toLowerCase() &&
         m.status !== 'merged'
     );
     if (duplicate) {
       throw new Error(
-        `Konto z loginem „${params.username}” już istnieje w skarbcu. Wybierz inny login lub przejdź do logowania.`
+        `Konto z loginem „${params.username}” już istnieje w skarbcu. Wybierz inny login lub zaloguj się w formularzu poniżej.`
       );
     }
 
@@ -1209,9 +1283,6 @@ export default function App() {
         console.warn('Opcjonalna rejestracja biometrii pominięta:', err);
       }
     }
-
-    const fbSessionUser = await ensureFirebaseAuthSession(true);
-    const boundAuthUid = fbSessionUser?.uid || auth?.currentUser?.uid || '';
 
     const newMember: Member = {
       id: memberId,
@@ -1253,7 +1324,16 @@ export default function App() {
     };
 
     await saveMemberToFirestore(memberId, newMember);
-    await saveDeviceToFirestore(devId, newDevice);
+    const savedNewDevice = await saveDeviceToFirestore(devId, newDevice);
+
+    setMembers((prev) =>
+      prev.some((m) => m.id === newMember.id) ? prev : [...prev, newMember]
+    );
+    setDevices((prev) =>
+      prev.some((d) => d.id === savedNewDevice.id)
+        ? prev
+        : [...prev, savedNewDevice]
+    );
 
     await logActivityInFirestore(
       memberId,
@@ -1281,14 +1361,25 @@ export default function App() {
     newPassword: string;
     setupBiometrics: boolean;
   }) => {
-    const targetMember = members.find((m) => m.id === params.targetMemberId);
+    let effectiveMembers = members;
+    if (effectiveMembers.length === 0) {
+      const liveState = await fetchLiveVaultBootstrapStateFromFirestore();
+      if (liveState.members.length > 0) {
+        effectiveMembers = liveState.members;
+        setMembers(liveState.members);
+      }
+    }
+
+    const targetMember = effectiveMembers.find(
+      (m) => m.id === params.targetMemberId
+    );
     if (!targetMember) {
       throw new Error(
         'Nie znaleziono konta domownika powiązanego z tym linkiem.'
       );
     }
 
-    const duplicate = members.find(
+    const duplicate = effectiveMembers.find(
       (m) =>
         m.id !== targetMember.id &&
         m.username.toLowerCase() === params.newUsername.toLowerCase() &&
@@ -2425,15 +2516,27 @@ export default function App() {
 
   if (!isOnline) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-6 bg-[var(--vault-bg)] text-[var(--vault-text)]">
-        <div className="max-w-md w-full p-8 rounded-xl border border-[var(--vault-danger)] bg-[var(--vault-surface)] text-center space-y-4">
-          <WifiOff className="w-10 h-10 text-[var(--vault-danger)] mx-auto" />
-          <h1 className="text-xl font-bold font-display">
-            Wymagane aktywne połączenie z internetem
-          </h1>
-          <p className="text-xs text-[var(--vault-muted)]">
-            FamilyStream Vault działa w trybie <strong>Online-Only (Cloud Firestore)</strong> dla zachowania natychmiastowej synchronizacji haseł i autoryzacji urządzeń domowników. Połącz się z siecią Wi-Fi lub komórkową, aby odblokować skarbiec.
-          </p>
+      <div className="min-h-screen flex flex-col bg-[var(--vault-bg)] text-[var(--vault-text)]">
+        <TopBar
+          currentMember={null}
+          activeTab="vault"
+          onSelectTab={() => {}}
+          pendingCount={0}
+          theme={theme}
+          onToggleTheme={handleToggleTheme}
+          onOpenAddPassword={() => {}}
+          onLogout={() => {}}
+                  />
+        <div className="flex-1 flex items-center justify-center p-6">
+          <div className="max-w-md w-full p-8 rounded-xl border border-[var(--vault-danger)] bg-[var(--vault-surface)] text-center space-y-4">
+            <WifiOff className="w-10 h-10 text-[var(--vault-danger)] mx-auto" />
+            <h1 className="text-xl font-bold font-display">
+              Wymagane aktywne połączenie z internetem
+            </h1>
+            <p className="text-xs text-[var(--vault-muted)]">
+              FamilyStream Vault działa w trybie <strong>Online-Only (Cloud Firestore)</strong> dla zachowania natychmiastowej synchronizacji haseł i autoryzacji urządzeń domowników. Połącz się z siecią Wi-Fi lub komórkową, aby odblokować skarbiec.
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -2519,16 +2622,14 @@ export default function App() {
       id="top"
       className="min-h-screen flex flex-col bg-[var(--vault-bg)] text-[var(--vault-text)]"
     >
-      {/* Clean Top Bar: Navigation, + Dodaj hasło, and quick Wyloguj */}
+      {/* Clean Top Bar: Navigation, + Dodaj hasło, Wyloguj, and top-right Theme Toggle */}
       <TopBar
         currentMember={currentMember}
         activeTab={activeAdminTab}
         onSelectTab={setActiveAdminTab}
         pendingCount={pendingApprovalsCount}
         theme={theme}
-        onToggleTheme={() =>
-          setTheme((prev) => (prev === 'dusk' ? 'linen' : 'dusk'))
-        }
+        onToggleTheme={handleToggleTheme}
         onOpenAddPassword={() => setIsAddModalOpen(true)}
         onLogout={handleLogout}
               />
@@ -2652,9 +2753,7 @@ export default function App() {
                   ).length
                 }
                 theme={theme}
-                onToggleTheme={() =>
-                  setTheme((prev) => (prev === 'dusk' ? 'linen' : 'dusk'))
-                }
+                onToggleTheme={handleToggleTheme}
                 isPWAInstalled={
                   isInstalled || detectedDevice.clientMode === 'pwa'
                 }

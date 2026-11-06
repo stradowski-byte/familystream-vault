@@ -1,5 +1,5 @@
 import React from 'react';
-import { Plus, LogOut, ShieldCheck, User } from 'lucide-react';
+import { Plus, LogOut, ShieldCheck, User, Sun, Moon } from 'lucide-react';
 import {
   isCoAdmin,
   isPrimaryAdmin,
@@ -34,7 +34,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const isTrustedCoAdmin = isCoAdmin(currentMember);
 
   return (
-    <header className="flex flex-wrap items-center justify-between gap-4 px-6 py-4 border-b border-[var(--vault-border)] bg-[var(--vault-surface)]">
+    <header className="flex flex-wrap items-center justify-between gap-3 px-4 sm:px-6 py-3.5 border-b border-[var(--vault-border)] bg-[var(--vault-surface)]">
       {/* Zone 1: Single text element wordmark */}
       <a
         href="#top"
@@ -48,7 +48,7 @@ export const TopBar: React.FC<TopBarProps> = ({
       </a>
 
       {/* Zone 2: Unified single-row navigation links across all screen sizes */}
-      <nav className="flex items-center gap-4 sm:gap-6 text-xs sm:text-sm font-medium text-[var(--vault-muted)] overflow-x-auto max-w-full py-0.5">
+      <nav className="order-3 lg:order-2 w-full lg:w-auto flex items-center gap-4 sm:gap-6 text-xs sm:text-sm font-medium text-[var(--vault-muted)] overflow-x-auto max-w-full py-0.5">
         {currentMember ? (
           <>
             <button
@@ -129,37 +129,51 @@ export const TopBar: React.FC<TopBarProps> = ({
         )}
       </nav>
 
-      {/* Zone 3: Primary actions (+ Dodaj hasło & Wyloguj) */}
-      <div className="flex items-center gap-2.5 shrink-0">
-        {currentMember ? (
+      {/* Zone 3: Primary actions (+ Dodaj hasło, Wyloguj & persistent top-right Theme Toggle Pictogram) */}
+      <div className="order-2 lg:order-3 flex items-center gap-2 shrink-0 ml-auto lg:ml-0">
+        {currentMember && (
           <>
             <button
               type="button"
               onClick={onOpenAddPassword}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Plus className="w-4 h-4" />
-              <span>+ Dodaj hasło</span>
+              <span>Dodaj hasło</span>
             </button>
 
             <button
               type="button"
               onClick={onLogout}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-[var(--vault-muted)] hover:text-[var(--vault-danger)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-bg)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-2 text-xs font-medium text-[var(--vault-muted)] hover:text-[var(--vault-danger)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-bg)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
-              <span>Wyloguj</span>
+              <span className="hidden sm:inline">Wyloguj</span>
             </button>
           </>
-        ) : (
-          <button
-            type="button"
-            onClick={onToggleTheme}
-            className="hidden sm:inline-flex px-3 py-2 text-xs font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface-hover)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            {theme === 'dusk' ? 'Motyw: Jasny Linen' : 'Motyw: Ciemny Dusk'}
-          </button>
         )}
+
+        <button
+          type="button"
+          onClick={onToggleTheme}
+          title={
+            theme === 'dusk'
+              ? 'Przełącz na motyw jasny (Linen)'
+              : 'Przełącz na motyw ciemny (Dusk)'
+          }
+          aria-label={
+            theme === 'dusk'
+              ? 'Przełącz na motyw jasny (Linen)'
+              : 'Przełącz na motyw ciemny (Dusk)'
+          }
+          className="inline-flex items-center justify-center w-9 h-9 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] hover:bg-[var(--vault-surface-hover)] text-[var(--vault-text)] transition-colors shrink-0 cursor-pointer"
+        >
+          {theme === 'dusk' ? (
+            <Sun className="w-4 h-4 text-[var(--vault-accent)]" />
+          ) : (
+            <Moon className="w-4 h-4 text-[var(--vault-accent)]" />
+          )}
+        </button>
       </div>
     </header>
   );

@@ -10,7 +10,10 @@ import {
   Cpu,
   FileJson,
   CheckCircle2,
+  Copy,
+  Check,
 } from 'lucide-react';
+import { PRODUCTION_FIRESTORE_RULES } from '../lib/firebase';
 
 interface FirebaseSetupGuideDropdownProps {
   defaultOpen?: boolean;
@@ -20,6 +23,7 @@ export const FirebaseSetupGuideDropdown: React.FC<
   FirebaseSetupGuideDropdownProps
 > = ({ defaultOpen = false }) => {
   const [isOpen, setIsOpen] = useState(defaultOpen);
+  const [copiedRules, setCopiedRules] = useState(false);
 
   return (
     <div className="rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] overflow-hidden">
@@ -64,13 +68,13 @@ export const FirebaseSetupGuideDropdown: React.FC<
             </div>
           </div>
 
-          {/* PART 1: STEP BY STEP GUIDE FOR NEW FIREBASE CONSOLE UI */}
+          {/* PART 1: STEP BY STEP GUIDE FOR NEW FIREBASE CONSOLE UI (6 VERIFIED STEPS) */}
           <div className="space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-xs sm:text-sm font-bold text-[var(--vault-text)] flex items-center gap-1.5">
                 <FileJson className="w-4 h-4 text-[var(--vault-accent)] shrink-0" />
                 <span>
-                  Część 1. Konfiguracja własnego projektu w nowym UI Firebase Console (5 kroków)
+                  Część 1. Kompletna procedura konfiguracji Firebase Console (Nowe UI — 6 kroków)
                 </span>
               </h3>
               <a
@@ -84,20 +88,23 @@ export const FirebaseSetupGuideDropdown: React.FC<
               </a>
             </div>
 
-            <ol className="space-y-3 text-[var(--vault-muted)] list-decimal list-inside">
+            <ol className="space-y-3.5 text-[var(--vault-muted)] list-decimal list-inside">
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Utwórz projekt w Firebase Console:
+                  Utwórz projekt i upewnij się, że jest wybrany w lewym górnym rogu konsoli:
                 </strong>{' '}
                 Wejdź na <code>console.firebase.google.com</code>, kliknij{' '}
-                <strong>Create a Firebase project</strong> (lub <strong>Add project</strong>), wpisz nazwę projektu (np.{' '}
-                <code>moj-rodzinny-skarbiec</code>), wyłącz opcjonalne Google Analytics i kliknij{' '}
-                <strong>Create project</strong>.
+                <strong>Create a Firebase project</strong> (lub <strong>Add project</strong>), wpisz nazwę (np.{' '}
+                <code>FamilyPwdVault</code>), wyłącz opcjonalne Google Analytics i kliknij{' '}
+                <strong>Create project</strong>.{' '}
+                <em>
+                  Ważne: na liście rozwijanej w lewym górnym rogu konsoli zawsze upewnij się, że edytujesz swój docelowy projekt produkcyjny (np. <code>FamilyPwdVault</code>), a nie projekt testowy AI Studio (<code>true-deployment-...</code>).
+                </em>
               </li>
 
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Skopiuj obiekt <code>firebaseConfig</code> (Koło zębate → Project settings → Your apps):
+                  Zarejestruj aplikację Web (<code>&lt;/&gt;</code>) i skopiuj surowy obiekt <code>firebaseConfig</code>:
                 </strong>{' '}
                 W lewym wąskim pasku nawigacji kliknij ikonę{' '}
                 <strong>koła zębatego (⚙) → Project settings</strong>. W zakładce{' '}
@@ -105,68 +112,106 @@ export const FirebaseSetupGuideDropdown: React.FC<
                 <strong>Your apps</strong> i kliknij okrągłą ikonę{' '}
                 <strong>Web (<code>&lt;/&gt;</code>)</strong>. Wpisz nazwę (np.{' '}
                 <code>FamilyStream Vault PWA</code>) i kliknij{' '}
-                <strong>Register app</strong>. Skopiuj blok{' '}
-                <code>&#123; apiKey: &quot;...&quot;, ... &#125;;</code> (lub cały kod SDK) i wklej go bezpośrednio w formularzu — <strong>bez dodawania cudzysłowów wokół kluczy i bez przerabiania na JSON</strong>.
+                <strong>Register app</strong>. Skopiuj domyślny blok wygenerowany przez Google:{' '}
+                <code>&#123; apiKey: &quot;AIzaSy...&quot;, authDomain: &quot;...&quot;, projectId: &quot;...&quot;, ... &#125;;</code>{' '}
+                (lub cały kod z <code>import &#123; initializeApp &#125;</code>).{' '}
+                <strong>
+                  Nie musisz zmieniać formatowania, dodawać cudzysłowów wokół kluczy ani usuwać średnika <code>;</code> na końcu
+                </strong>{' '}
+                — aplikacja natywnie obsługuje surowy format z Firebase Console.
               </li>
 
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Włącz Google oraz Anonymous w „Authentication with Identity Platform”:
+                  Włącz dostawców „Google” (z e-mailem wsparcia) oraz „Anonymous” w Authentication:
                 </strong>{' '}
-                W lewym pasku nawigacji wybierz ikonę dwóch osób (<strong>Authentication</strong>) i kliknij{' '}
+                W lewym pasku nawigacji wybierz ikonę dwóch osób (<strong>Build → Authentication</strong>) i kliknij{' '}
                 <strong>Get started</strong>. Na górnym poziomym pasku zakładek (<code>Users | Sign-in method | Templates | Usage | Settings</code>) przejdź do{' '}
                 <strong>Sign-in method</strong>:
                 <ul className="list-disc list-inside pl-3 mt-1.5 space-y-1">
                   <li>
-                    W tabeli <strong>Sign-in providers</strong> kliknij niebieski przycisk{' '}
-                    <strong>Add new provider</strong> (w prawym górnym rogu tabeli).
+                    Kliknij niebieski przycisk <strong>Add new provider</strong> (w prawym górnym rogu tabeli) → wybierz{' '}
+                    <strong>Google</strong> → przełącz suwak <strong>Enable</strong> →{' '}
+                    <strong>koniecznie wybierz swój adres Gmail w polu <em>Project support email</em></strong> i kliknij{' '}
+                    <strong>Save</strong>{' '}
+                    <em>
+                      (zapisanie e-maila wsparcia generuje identyfikator Web OAuth Client ID i zapobiega błędowi <code>auth/configuration-not-found</code>; jeśli błąd wystąpi, kliknij ikonę ołówka ✏️ przy Google i ponownie kliknij Save)
+                    </em>
+                    .
                   </li>
                   <li>
-                    Wybierz <strong>Google</strong> → przełącz suwak <strong>Enable</strong> → wybierz swój e-mail w polu <em>Project support email</em> → kliknij <strong>Save</strong> (status w tabeli zmieni się na zielone <strong>Enabled</strong>).
-                  </li>
-                  <li>
-                    Ponownie kliknij niebieski przycisk <strong>Add new provider</strong> → wybierz{' '}
+                    Ponownie kliknij <strong>Add new provider</strong> → wybierz{' '}
                     <strong>Anonymous</strong> → przełącz suwak <strong>Enable</strong> → kliknij{' '}
-                    <strong>Save</strong> (w tabeli zobaczysz oba wiersze: <strong>Google — Enabled</strong> oraz <strong>Anonymous — Enabled</strong>).
+                    <strong>Save</strong> (w tabeli oba wiersze <strong>Google</strong> oraz <strong>Anonymous</strong> muszą mieć zielony status <strong>Enabled</strong>).
                   </li>
                 </ul>
               </li>
 
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Dodaj domenę w zakładce „Settings → Authorized domains”:
+                  Dodaj domenę aplikacji w zakładce „Authentication → Settings → Authorized domains”:
                 </strong>{' '}
                 Pozostając w widoku <strong>Authentication</strong>, na górnym poziomym pasku zakładek kliknij{' '}
-                <strong>Settings</strong> (obok <em>Usage</em>), wybierz sekcję{' '}
-                <strong>Authorized domains</strong>, kliknij przycisk{' '}
+                <strong>Settings</strong> (obok <em>Usage</em>), w lewym podmenu wybierz{' '}
+                <strong>Authorized domains</strong>, kliknij niebieski przycisk{' '}
                 <strong>Add domain</strong> i wpisz domenę swojego GitHub Pages (np.{' '}
                 <code>stradowski-byte.github.io</code>).
               </li>
 
               <li>
                 <strong className="text-[var(--vault-text)]">
-                  Utwórz bazę w „Firestore Database” i opublikuj zakładkę „Rules”:
+                  Utwórz bazę w „Firestore Database” i opublikuj reguły bezpieczeństwa w zakładce „Rules”:
                 </strong>{' '}
-                W lewym pasku nawigacji wybierz <strong>Firestore Database</strong> i kliknij{' '}
+                W lewym pasku nawigacji wybierz <strong>Build → Firestore Database</strong> i kliknij{' '}
                 <strong>Create database</strong>:
                 <ul className="list-disc list-inside pl-3 mt-1.5 space-y-1">
                   <li>
-                    Wybierz edycję <strong>Standard edition</strong> i kliknij <strong>Next</strong>.
-                  </li>
-                  <li>
-                    Zostaw Database ID jako <code>(default)</code>, wybierz lokalizację blisko siebie (np.{' '}
+                    Wybierz edycję <strong>Standard edition</strong> → <strong>Next</strong>, zostaw Database ID jako{' '}
+                    <code>(default)</code>, wybierz lokalizację blisko siebie (np.{' '}
                     <code>eur3 (europe-west)</code> lub <code>europe-west3 (Frankfurt)</code>) i kliknij{' '}
                     <strong>Next → Create</strong>.
                   </li>
                   <li>
-                    Gdy baza się otworzy, na górnym pasku widoku Firestore przejdź do zakładki{' '}
-                    <strong>Rules</strong> (obok <em>Data | Indexes | Usage</em>), wklej reguły z pliku{' '}
-                    <code>firestore.rules</code> i kliknij <strong>Publish</strong>.
-                  </li>
-                  <li>
-                    <strong>Nie musisz klikać „+ Start collection”</strong> — zaloguj się jako Administrator w aplikacji, a wszystkie 6 kolekcji utworzy się automatycznie!
+                    <strong>Kluczowe (zapobiega błędowi <code>Missing or insufficient permissions</code>):</strong> Nowo utworzona baza ma domyślnie całkowicie zablokowany zapis (<code>allow read, write: if false;</code>). Na górnym poziomym pasku widoku Firestore przejdź do zakładki{' '}
+                    <strong>Rules</strong> (obok <em>Data | Indexes | Usage</em>), skopiuj gotowe reguły bezpieczeństwa przyciskiem poniżej, wklej je w miejsce domyślnego kodu i kliknij{' '}
+                    <strong>Publish</strong>:
+                    <div className="mt-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard
+                            .writeText(PRODUCTION_FIRESTORE_RULES)
+                            .catch(() => {});
+                          setCopiedRules(true);
+                          setTimeout(() => setCopiedRules(false), 3000);
+                        }}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--vault-accent)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] text-[var(--vault-text)] font-semibold text-[11px] cursor-pointer"
+                      >
+                        {copiedRules ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-[var(--vault-success)]" />
+                            <span>Skopiowano gotowe reguły firestore.rules do schowka!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                            <span>Kopiuj gotowe reguły firestore.rules (1-klik)</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </li>
                 </ul>
+              </li>
+
+              <li>
+                <strong className="text-[var(--vault-text)]">
+                  Wklej config w aplikacji PWA i zaloguj się przez Google (Auto-inicjalizacja 6 kolekcji):
+                </strong>{' '}
+                Wklej skopiowany w Kroku 2 surowy config w aplikacji PWA (lub wgraj go z pliku), kliknij{' '}
+                <strong>„Załaduj konfigurację i uruchom jako Administrator”</strong>, a następnie{' '}
+                <strong>„Zaloguj przez Google (Administrator)”</strong>.{' '}
+                <strong>Nie musisz ręcznie klikać „+ Start collection” w konsoli Firebase</strong> — przy pierwszym logowaniu aplikacja sama sprawdza i automatycznie zakłada wszystkie 6 kolekcji bazowych (<code>vaultConfig</code>, <code>members</code>, <code>devices</code>, <code>passwords</code>, <code>invitations</code>, <code>activityLogs</code>) bez ruszania istniejących danych.
               </li>
             </ol>
           </div>
