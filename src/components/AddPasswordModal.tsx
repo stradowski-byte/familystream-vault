@@ -1,5 +1,15 @@
-import React, { useState } from 'react';
-import { X, RefreshCw, Lock, Users, UserPlus, Trash2 } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import {
+  X,
+  RefreshCw,
+  Lock,
+  Users,
+  UserPlus,
+  Trash2,
+  ChevronDown,
+  ChevronUp,
+  Check,
+} from 'lucide-react';
 import { Member, SubAccountEntry, VaultCategory } from '../types/vault';
 import { generateStrongPassword } from '../lib/crypto';
 
@@ -39,9 +49,12 @@ export const AddPasswordModal: React.FC<AddPasswordModalProps> = ({
   const [login, setLogin] = useState('');
   const [password, setPassword] = useState('');
   const [revealToAdmin, setRevealToAdmin] = useState(false);
-  const [allowedMemberIds, setAllowedMemberIds] = useState<string[]>(
-    allMembers.filter((m) => m.status === 'active').map((m) => m.id)
-  );
+
+  // By default, a newly created shared login is assigned ONLY to the creator ([currentMember.id])
+  const [allowedMemberIds, setAllowedMemberIds] = useState<string[]>([
+    currentMember.id,
+  ]);
+  const [isMembersDropdownOpen, setIsMembersDropdownOpen] = useState(false);
 
   // Optional initial sub-accounts (e.g. Netflix Pakiet Rodzinny +10 zł)
   const [subAccounts, setSubAccounts] = useState<SubAccountEntry[]>([]);
@@ -53,6 +66,14 @@ export const AddPasswordModal: React.FC<AddPasswordModalProps> = ({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Reset member selection strictly to [currentMember.id] whenever the modal opens
+  useEffect(() => {
+    if (isOpen) {
+      setAllowedMemberIds([currentMember.id]);
+      setIsMembersDropdownOpen(false);
+    }
+  }, [isOpen, currentMember.id]);
 
   if (!isOpen) return null;
 
@@ -66,6 +87,13 @@ export const AddPasswordModal: React.FC<AddPasswordModalProps> = ({
         : [...prev, memberId]
     );
   };
+
+  const selectedActiveMembers = activeMembers.filter(
+    (m) => m.id === currentMember.id || allowedMemberIds.includes(m.id)
+  );
+  const isOnlyMeSelected =
+    selectedActiveMembers.length <= 1 &&
+    selectedActiveMembers.every((m) => m.id === currentMember.id);
 
   const handleAddDraftSubAccount = () => {
     if (!subMemberId || !subLogin.trim() || !subPassword.trim()) return;
@@ -135,6 +163,8 @@ export const AddPasswordModal: React.FC<AddPasswordModalProps> = ({
       setLogin('');
       setPassword('');
       setRevealToAdmin(false);
+      setAllowedMemberIds([currentMember.id]);
+      setIsMembersDropdownOpen(false);
       setSubAccounts([]);
       setIsAddingSub(false);
       onClose();
@@ -315,6 +345,107 @@ export const AddPasswordModal: React.FC<AddPasswordModalProps> = ({
 
           {section === 'shared' && (
             <>
+              {/* Multi-Select Dropdown for choosing allowed family members (defaults strictly to [currentMember.id]) */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-[var(--vault-muted)]">
+                  Domownicy z dostępem do tej karty (lista wielokrotnego wyboru)
+                </label>
+
+                <div className="rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setIsMembersDropdownOpen((prev) => !prev)}
+                    className="w-full px-3.5 py-2.5 flex items-center justify-between gap-2 text-left text-xs hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Users className="w-4 h-4 text-[var(--vault-accent)] shrink-0" />
+                      <span className="font-medium text-[var(--vault-text)] truncate">
+                        {isOnlyMeSelected
+                          ? `Domyślnie tylko ja (${currentMember.fullName})`
+                          : `Wybrano (${selectedActiveMembers.length}): ${selectedActiveMembers
+                              .map((m) => m.fullName)
+                              .join(', ')}`}
+                      </span>
+                    </div>
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--vault-accent)] shrink-0">
+                      <span>{isMembersDropdownOpen ? 'Zwiń listę' : 'Wybierz osoby'}</span>
+                      {isMembersDropdownOpen ? (
+                        <ChevronUp className="w-4 h-4" />
+                      ) : (
+                        <ChevronDown className="w-4 h-4" />
+                      )}
+                    </span>
+                  </button>
+
+                  {isMembersDropdownOpen && (
+                    <div className="p-3 border-t border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-2.5">
+                      <div className="flex items-center justify-between text-[11px] text-[var(--vault-muted)] pb-1.5 border-b border-[var(--vault-border)]">
+                        <span>Zaznacz domowników, którzy zobaczą ten login:</span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAllowedMemberIds(activeMembers.map((m) => m.id))
+                            }
+                            className="text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer"
+                          >
+                            Wszyscy ({activeMembers.length})
+                          </button>
+                          <span>·</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setAllowedMemberIds([currentMember.id])
+                            }
+                            className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] font-semibold cursor-pointer"
+                          >
+                            Tylko ja
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1 max-h-44 overflow-y-auto pr-1">
+                        {activeMembers.map((member) => {
+                          const isCreator = member.id === currentMember.id;
+                          const checked =
+                            isCreator || allowedMemberIds.includes(member.id);
+                          return (
+                            <label
+                              key={member.id}
+                              className={`flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs cursor-pointer select-none transition-colors ${
+                                checked
+                                  ? 'bg-[var(--vault-bg)] text-[var(--vault-text)] font-medium'
+                                  : 'text-[var(--vault-muted)] hover:bg-[var(--vault-bg)] hover:text-[var(--vault-text)]'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  disabled={isCreator}
+                                  onChange={() => handleToggleMember(member.id)}
+                                  className="rounded border-[var(--vault-border)] cursor-pointer"
+                                />
+                                <span className="truncate">
+                                  {member.fullName} ({member.username})
+                                </span>
+                              </div>
+                              {isCreator ? (
+                                <span className="text-[10px] font-semibold text-[var(--vault-accent)] shrink-0">
+                                  Właściciel (Ty)
+                                </span>
+                              ) : checked ? (
+                                <Check className="w-3.5 h-3.5 text-[var(--vault-success)] shrink-0" />
+                              ) : null}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* Optional Sub-Accounts Section (e.g., Netflix +10 zł) */}
               <div className="p-3.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-3">
                 <div className="flex items-center justify-between gap-2">
@@ -445,57 +576,6 @@ export const AddPasswordModal: React.FC<AddPasswordModalProps> = ({
                     ))}
                   </div>
                 )}
-              </div>
-
-              <div className="p-3.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-[var(--vault-text)]">
-                    Domownicy z dostępem do tej karty:
-                  </span>
-                  <div className="flex items-center gap-2 text-xs">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setAllowedMemberIds(activeMembers.map((m) => m.id))
-                      }
-                      className="text-[var(--vault-accent)] hover:underline cursor-pointer"
-                    >
-                      Wszyscy
-                    </button>
-                    <span>·</span>
-                    <button
-                      type="button"
-                      onClick={() => setAllowedMemberIds([currentMember.id])}
-                      className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer"
-                    >
-                      Tylko ja
-                    </button>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-36 overflow-y-auto">
-                  {activeMembers.map((member) => {
-                    const checked =
-                      member.id === currentMember.id ||
-                      allowedMemberIds.includes(member.id);
-                    return (
-                      <label
-                        key={member.id}
-                        className="flex items-center gap-2 text-xs text-[var(--vault-text)] cursor-pointer py-1"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          disabled={member.id === currentMember.id}
-                          onChange={() => handleToggleMember(member.id)}
-                        />
-                        <span className="truncate">
-                          {member.fullName} ({member.username})
-                          {member.id === currentMember.id ? ' · Ty' : ''}
-                        </span>
-                      </label>
-                    );
-                  })}
-                </div>
               </div>
             </>
           )}

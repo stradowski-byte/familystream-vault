@@ -13,6 +13,8 @@ import {
   ChevronDown,
   ChevronUp,
   UserPlus,
+  ZoomIn,
+  X,
 } from 'lucide-react';
 import {
   DecryptedPrivatePayload,
@@ -80,6 +82,12 @@ export const PasswordCard: React.FC<PasswordCardProps> = ({
   const [isSavingAccess, setIsSavingAccess] = useState(false);
   const [isTogglingReveal, setIsTogglingReveal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [magnifiedViewData, setMagnifiedViewData] = useState<{
+    title: string;
+    subtitle: string;
+    login: string;
+    password: string;
+  } | null>(null);
 
   // Sub-accounts state (for Netflix +10 zł / family multi-accounts)
   const [revealedSubPassIds, setRevealedSubPassIds] = useState<string[]>([]);
@@ -543,6 +551,26 @@ export const PasswordCard: React.FC<PasswordCardProps> = ({
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    setShowPassword(true);
+                    setMagnifiedViewData({
+                      title: displayServiceName,
+                      subtitle:
+                        isSubAccountOnlyView && myAssignedSubAccount
+                          ? `Twoje subkonto (${myAssignedSubAccount.label || 'Rodzinne'})`
+                          : categoryName,
+                      login: displayLogin,
+                      password: displayPassword,
+                    });
+                  }}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[var(--vault-accent)] border border-[var(--vault-accent)]/60 rounded-lg hover:bg-[var(--vault-surface)] transition-colors cursor-pointer"
+                  title="Powiększ hasło na cały ekran (Lupa dla słabowidzących)"
+                >
+                  <ZoomIn className="w-3.5 h-3.5 shrink-0" />
+                  <span>Lupa</span>
+                </button>
+                <button
+                  type="button"
                   onClick={() => handleCopy(displayPassword, 'password', true)}
                   className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg hover:bg-[var(--vault-surface)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                 >
@@ -844,12 +872,39 @@ export const PasswordCard: React.FC<PasswordCardProps> = ({
                                   )
                                 }
                                 className="p-1 text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded cursor-pointer"
+                                title={
+                                  isSubPassRevealed
+                                    ? 'Ukryj hasło subkonta'
+                                    : 'Pokaż hasło subkonta'
+                                }
                               >
                                 {isSubPassRevealed ? (
                                   <EyeOff className="w-3 h-3" />
                                 ) : (
                                   <Eye className="w-3 h-3" />
                                 )}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (!revealedSubPassIds.includes(sa.id)) {
+                                    setRevealedSubPassIds((prev) => [
+                                      ...prev,
+                                      sa.id,
+                                    ]);
+                                  }
+                                  setMagnifiedViewData({
+                                    title: `${displayServiceName} — ${sa.assignedMemberName}`,
+                                    subtitle: sa.label || 'Subkonto rodzinne',
+                                    login: sa.login,
+                                    password: sa.passwordValue,
+                                  });
+                                }}
+                                className="inline-flex items-center gap-1 px-1.5 py-1 text-[11px] font-semibold text-[var(--vault-accent)] border border-[var(--vault-accent)]/60 rounded hover:bg-[var(--vault-surface)] cursor-pointer"
+                                title="Powiększ hasło subkonta (Lupa)"
+                              >
+                                <ZoomIn className="w-3 h-3" />
+                                <span>Lupa</span>
                               </button>
                               <button
                                 type="button"
@@ -905,79 +960,128 @@ export const PasswordCard: React.FC<PasswordCardProps> = ({
             </div>
           )}
 
-          {/* Shared Access List & Editor (visible to Owner/Admin) */}
+          {/* Shared Access Multi-Select Dropdown (visible to Owner/Admin) */}
           {!isPrivate && isOwnerOrAdmin ? (
             <div className="pt-2 border-t border-[var(--vault-border)] space-y-2">
-              <div className="flex items-center justify-between gap-2 text-xs text-[var(--vault-muted)]">
-                <span className="truncate">
-                  Uprawnieni ({allowedMemberNames.length}):{' '}
-                  <strong className="font-medium text-[var(--vault-text)]">
-                    {allowedMemberNames.join(', ') || 'Tylko właściciel'}
-                  </strong>
-                </span>
-                {canManageAccess && (
-                  <button
-                    type="button"
-                    onClick={() => {
+              <div className="rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] overflow-hidden">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!isEditingAccess) {
                       setSelectedMemberIds(record.allowedMemberIds);
-                      setIsEditingAccess((v) => !v);
-                    }}
-                    className="inline-flex items-center gap-1 text-xs font-medium text-[var(--vault-accent)] hover:underline whitespace-nowrap shrink-0 cursor-pointer"
-                  >
-                    <Users className="w-3.5 h-3.5" />
-                    <span>{isEditingAccess ? 'Zamknij' : 'Edytuj dostęp'}</span>
-                  </button>
+                    }
+                    setIsEditingAccess((v) => !v);
+                  }}
+                  className="w-full px-3 py-2 flex items-center justify-between gap-2 text-left text-xs hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <Users className="w-3.5 h-3.5 text-[var(--vault-accent)] shrink-0" />
+                    <span className="text-[var(--vault-muted)] truncate">
+                      Uprawnieni ({allowedMemberNames.length}):{' '}
+                      <strong className="font-medium text-[var(--vault-text)]">
+                        {allowedMemberNames.length <= 1
+                          ? `Tylko ${allowedMemberNames[0] || record.ownerName}`
+                          : allowedMemberNames.join(', ')}
+                      </strong>
+                    </span>
+                  </div>
+                  {canManageAccess && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--vault-accent)] shrink-0">
+                      <span>{isEditingAccess ? 'Zwiń listę' : 'Wybierz osoby'}</span>
+                      {isEditingAccess ? (
+                        <ChevronUp className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      )}
+                    </span>
+                  )}
+                </button>
+
+                {isEditingAccess && canManageAccess && (
+                  <div className="p-3 border-t border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-2.5">
+                    <div className="flex items-center justify-between text-[11px] text-[var(--vault-muted)] pb-1.5 border-b border-[var(--vault-border)]">
+                      <span>Wybierz domowników uprawnionych do tej karty:</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setSelectedMemberIds(activeMembers.map((m) => m.id))
+                          }
+                          className="text-[var(--vault-accent)] hover:underline font-semibold cursor-pointer"
+                        >
+                          Wszyscy ({activeMembers.length})
+                        </button>
+                        <span>·</span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedMemberIds([record.ownerId])}
+                          className="text-[var(--vault-muted)] hover:text-[var(--vault-text)] font-semibold cursor-pointer"
+                        >
+                          Tylko właściciel
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-1 max-h-44 overflow-y-auto pr-1">
+                      {activeMembers.map((member) => {
+                        const isCreator = member.id === record.ownerId;
+                        const isChecked =
+                          isCreator || selectedMemberIds.includes(member.id);
+                        return (
+                          <label
+                            key={member.id}
+                            className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs cursor-pointer select-none transition-colors ${
+                              isChecked
+                                ? 'bg-[var(--vault-bg)] text-[var(--vault-text)] font-medium'
+                                : 'text-[var(--vault-muted)] hover:bg-[var(--vault-bg)] hover:text-[var(--vault-text)]'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                disabled={isCreator}
+                                onChange={() =>
+                                  handleToggleMemberAccess(member.id)
+                                }
+                                className="rounded border-[var(--vault-border)] cursor-pointer"
+                              />
+                              <span className="truncate">
+                                {member.fullName} ({member.username})
+                              </span>
+                            </div>
+                            {isCreator ? (
+                              <span className="text-[10px] font-semibold text-[var(--vault-accent)] shrink-0">
+                                Właściciel
+                              </span>
+                            ) : isChecked ? (
+                              <Check className="w-3.5 h-3.5 text-[var(--vault-success)] shrink-0" />
+                            ) : null}
+                          </label>
+                        );
+                      })}
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-1 border-t border-[var(--vault-border)]">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingAccess(false)}
+                        className="px-3 py-1 text-xs text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer"
+                      >
+                        Anuluj
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSaveAccess}
+                        disabled={isSavingAccess}
+                        className="px-3.5 py-1 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-md cursor-pointer"
+                      >
+                        {isSavingAccess ? 'Zapisywanie...' : 'Zapisz uprawnienia'}
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
-
-              {isEditingAccess && (
-                <div className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2.5">
-                  <div className="text-xs font-medium text-[var(--vault-text)]">
-                    Wybierz domowników uprawnionych do tego konta:
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                    {activeMembers.map((member) => {
-                      const isChecked = selectedMemberIds.includes(member.id);
-                      const isCreator = member.id === record.ownerId;
-                      return (
-                        <label
-                          key={member.id}
-                          className="flex items-center gap-2 text-xs text-[var(--vault-text)] cursor-pointer select-none py-1"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            disabled={isCreator}
-                            onChange={() => handleToggleMemberAccess(member.id)}
-                            className="rounded border-[var(--vault-border)]"
-                          />
-                          <span className="truncate">
-                            {member.fullName} ({member.username})
-                            {isCreator ? ' · Właściciel' : ''}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                  <div className="flex justify-end gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setIsEditingAccess(false)}
-                      className="px-3 py-1 text-xs text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer"
-                    >
-                      Anuluj
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleSaveAccess}
-                      disabled={isSavingAccess}
-                      className="px-3 py-1 text-xs font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-md cursor-pointer"
-                    >
-                      {isSavingAccess ? 'Zapisywanie...' : 'Zapisz uprawnienia'}
-                    </button>
-                  </div>
-                </div>
-              )}
             </div>
           ) : isPrivate ? (
             <div className="pt-2 border-t border-[var(--vault-border)] space-y-2.5">
@@ -1027,6 +1131,168 @@ export const PasswordCard: React.FC<PasswordCardProps> = ({
               </div>
             </div>
           ) : null}
+        </div>
+      )}
+
+      {/* CENTRAL HIGH-CONTRAST MAGNIFIER MODAL ("LUPA") FOR EASY READING */}
+      {magnifiedViewData && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setMagnifiedViewData(null)}
+        >
+          <div
+            className="w-full max-w-2xl rounded-2xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] p-5 sm:p-7 space-y-5 max-h-[92vh] overflow-y-auto shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-4 border-b border-[var(--vault-border)] pb-4">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
+                  <ZoomIn className="w-4 h-4" />
+                  <span>Powiększony podgląd hasła (Tryb Lupy) · {magnifiedViewData.subtitle}</span>
+                </div>
+                <h2 className="text-xl sm:text-2xl font-bold font-display text-[var(--vault-text)] mt-0.5">
+                  {magnifiedViewData.title}
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setMagnifiedViewData(null)}
+                className="p-2 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] hover:bg-[var(--vault-surface-hover)] cursor-pointer shrink-0"
+                title="Zamknij lupę"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Large Login Box */}
+            <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--vault-muted)]">
+                  Login / E-mail
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleCopy(magnifiedViewData.login, 'magnified_login', false)
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg cursor-pointer"
+                >
+                  {copiedField === 'magnified_login' ? (
+                    <>
+                      <Check className="w-4 h-4 text-[var(--vault-success)]" />
+                      <span>Skopiowano login!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4 text-[var(--vault-accent)]" />
+                      <span>Kopiuj login</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <div className="font-mono text-xl sm:text-2xl font-bold text-[var(--vault-text)] break-all select-all">
+                {magnifiedViewData.login}
+              </div>
+            </div>
+
+            {/* Huge Password Box */}
+            <div className="p-4 sm:p-5 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-bg)] space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--vault-accent)]">
+                  Hasło (powiększone)
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleCopy(
+                      magnifiedViewData.password,
+                      'magnified_password',
+                      true
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs sm:text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
+                >
+                  {copiedField === 'magnified_password' ? (
+                    <>
+                      <Check className="w-4 h-4" />
+                      <span>Skopiowano hasło!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-4 h-4" />
+                      <span>Kopiuj hasło</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <div className="font-mono text-2xl sm:text-4xl font-bold tracking-wider text-[var(--vault-text)] break-all select-all py-1">
+                {magnifiedViewData.password}
+              </div>
+            </div>
+
+            {/* Character-by-Character Breakdown Grid */}
+            <div className="space-y-2.5">
+              <div className="text-xs font-medium text-[var(--vault-muted)]">
+                Podział znak po znaku (rozróżnia cyfry np. <strong className="text-[var(--vault-accent)]">0</strong> od wielkiej litery <strong className="text-[var(--vault-text)]">O</strong> oraz <strong className="text-[var(--vault-accent)]">1</strong> od <strong className="text-[var(--vault-text)]">l</strong>):
+              </div>
+              <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2">
+                {Array.from(magnifiedViewData.password).map((ch, idx) => {
+                  const isDigit = /^[0-9]$/.test(ch);
+                  const isUpper = /^[A-ZĄĆĘŁŃÓŚŹŻ]$/.test(ch);
+                  const isLower = /^[a-ząćęłńóśźż]$/.test(ch);
+                  const charTypeLabel = isDigit
+                    ? 'CYFRA'
+                    : isUpper
+                      ? 'WIELKA'
+                      : isLower
+                        ? 'mała'
+                        : ch === ' '
+                          ? 'SPACJA'
+                          : 'ZNAK';
+                  return (
+                    <div
+                      key={`${idx}_${ch}`}
+                      className={`p-2.5 rounded-xl border flex flex-col items-center justify-center text-center ${
+                        isDigit
+                          ? 'border-[var(--vault-accent)] bg-[var(--vault-surface)]'
+                          : 'border-[var(--vault-border)] bg-[var(--vault-bg)]'
+                      }`}
+                    >
+                      <span className="text-[10px] font-mono text-[var(--vault-muted)] tabular-nums">
+                        #{idx + 1}
+                      </span>
+                      <span
+                        className={`font-mono text-2xl sm:text-3xl font-bold my-0.5 ${
+                          isDigit
+                            ? 'text-[var(--vault-accent)]'
+                            : 'text-[var(--vault-text)]'
+                        }`}
+                      >
+                        {ch === ' ' ? '␣' : ch}
+                      </span>
+                      <span
+                        className={`text-[10px] font-semibold ${
+                          isDigit
+                            ? 'text-[var(--vault-accent)]'
+                            : 'text-[var(--vault-muted)]'
+                        }`}
+                      >
+                        {charTypeLabel}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setMagnifiedViewData(null)}
+              className="w-full py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl cursor-pointer"
+            >
+              Zamknij powiększenie
+            </button>
+          </div>
         </div>
       )}
     </div>
