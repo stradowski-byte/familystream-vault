@@ -1,0 +1,6 @@
+{
+  "summary":  "Plan całkowitego usunięcia z aplikacji własnej obsługi GitHub (zakładki Admina, endpointów backendowych i typów) na rzecz wyłącznego korzystania z natywnej integracji GitHub w Google AI Studio, wraz z bezpiecznym, opcjonalnym ładowaniem pliku konfiguracyjnego Firebase.",
+  "updatedAt":  "2026-11-07T18:41:01.955736734Z",
+  "requestFeedback":  true,
+  "userFacing":  true
+}

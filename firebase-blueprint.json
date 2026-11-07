@@ -1,0 +1,237 @@
+{
+  "entities": {
+    "VaultConfig": {
+      "title": "VaultConfig",
+      "description": "Global configuration of the FamilyStream Vault instance.",
+      "type": "object",
+      "properties": {
+        "initialized": { "type": "boolean", "description": "Whether the vault is initialized." },
+        "adminUid": { "type": "string", "maxLength": 128, "description": "Firebase Auth UID of the primary administrator." },
+        "adminEmail": { "type": "string", "maxLength": 256, "description": "Email address of the primary administrator." },
+        "adminMemberId": { "type": "string", "maxLength": 128, "description": "Member ID of the primary administrator." },
+        "templatesLoaded": { "type": "boolean", "description": "Whether default templates have been loaded." },
+        "categoriesJson": { "type": "string", "maxLength": 20000, "description": "Serialized JSON array of vault categories." },
+        "defaultTheme": { "type": "string", "enum": ["dusk", "linen"], "description": "Default UI theme." },
+        "clipboardClearSeconds": { "type": "number", "description": "Seconds before auto-clearing copied passwords." },
+        "autoLockMinutes": { "type": "number", "description": "Minutes of inactivity before locking the vault." },
+        "createdAt": { "type": "string", "maxLength": 64, "description": "ISO creation timestamp." },
+        "updatedAt": { "type": "string", "maxLength": 64, "description": "ISO update timestamp." }
+      },
+      "required": [
+        "initialized",
+        "adminUid",
+        "adminEmail",
+        "adminMemberId",
+        "templatesLoaded",
+        "categoriesJson",
+        "defaultTheme",
+        "clipboardClearSeconds",
+        "autoLockMinutes",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Member": {
+      "title": "Member",
+      "description": "A family member, co-admin, or primary administrator with E2E wrapped encryption keys.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "username": { "type": "string", "maxLength": 80 },
+        "passwordHash": { "type": "string", "maxLength": 512 },
+        "pbkdf2Salt": { "type": "string", "maxLength": 256 },
+        "wrappedMasterKey": { "type": "string", "maxLength": 2048 },
+        "vaultEscrowKey": { "type": "string", "maxLength": 2048 },
+        "mergedVaultKeysJson": { "type": "string", "maxLength": 20000 },
+        "role": { "type": "string", "enum": ["admin", "co_admin", "member"] },
+        "status": { "type": "string", "enum": ["active", "pending", "merged"] },
+        "googleUid": { "type": "string", "maxLength": 256 },
+        "invitedByToken": { "type": "string", "maxLength": 256 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "fullName",
+        "username",
+        "passwordHash",
+        "pbkdf2Salt",
+        "wrappedMasterKey",
+        "vaultEscrowKey",
+        "mergedVaultKeysJson",
+        "role",
+        "status",
+        "googleUid",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Device": {
+      "title": "Device",
+      "description": "A physical or browser/PWA device paired with a member account and holding a Hardware Certificate.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "memberId": { "type": "string", "maxLength": 128 },
+        "memberName": { "type": "string", "maxLength": 120 },
+        "username": { "type": "string", "maxLength": 80 },
+        "deviceFingerprint": { "type": "string", "maxLength": 256 },
+        "deviceName": { "type": "string", "maxLength": 200 },
+        "customLabel": { "type": "string", "maxLength": 200 },
+        "clientMode": { "type": "string", "enum": ["pwa", "browser"] },
+        "hardwareModelOs": { "type": "string", "maxLength": 200 },
+        "hardwareDeviceType": { "type": "string", "enum": ["phone", "tablet", "laptop_desktop"] },
+        "hardwareSignatureHash": { "type": "string", "maxLength": 128 },
+        "deviceApprovalToken": { "type": "string", "maxLength": 256 },
+        "deviceCertificateFingerprint": { "type": "string", "maxLength": 128 },
+        "hardwareWrappedDek": { "type": "string", "maxLength": 4096 },
+        "certificateIssuedAt": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["approved", "pending", "revoked"] },
+        "webAuthnCredentialId": { "type": "string", "maxLength": 1024 },
+        "requestedAt": { "type": "string", "maxLength": 64 },
+        "lastSeenAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "memberId",
+        "memberName",
+        "username",
+        "deviceFingerprint",
+        "deviceName",
+        "customLabel",
+        "clientMode",
+        "status",
+        "webAuthnCredentialId",
+        "requestedAt",
+        "lastSeenAt"
+      ]
+    },
+    "PasswordRecord": {
+      "title": "PasswordRecord",
+      "description": "An E2E AES-256-GCM encrypted password entry (shared VOD or private record).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "section": { "type": "string", "enum": ["shared", "private"] },
+        "categoryId": { "type": "string", "maxLength": 128 },
+        "serviceName": { "type": "string", "maxLength": 200 },
+        "serviceUrl": { "type": "string", "maxLength": 500 },
+        "login": { "type": "string", "maxLength": 256 },
+        "passwordValue": { "type": "string", "maxLength": 2048 },
+        "encryptedPayload": { "type": "string", "maxLength": 50000 },
+        "keySalt": { "type": "string", "maxLength": 256 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "ownerName": { "type": "string", "maxLength": 120 },
+        "allowedMemberIds": { "type": "array" },
+        "revealToAdmin": { "type": "boolean" },
+        "subAccountsJson": { "type": "string", "maxLength": 50000 },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "maxLength": 64 },
+        "passwordUpdatedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "section",
+        "categoryId",
+        "serviceName",
+        "serviceUrl",
+        "login",
+        "passwordValue",
+        "encryptedPayload",
+        "keySalt",
+        "ownerId",
+        "ownerName",
+        "allowedMemberIds",
+        "createdAt",
+        "updatedAt",
+        "passwordUpdatedAt"
+      ]
+    },
+    "VaultInvitation": {
+      "title": "VaultInvitation",
+      "description": "Invitation or account recovery link stored in Firestore.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "token": { "type": "string", "maxLength": 256 },
+        "purpose": { "type": "string", "enum": ["new_member", "account_recovery"] },
+        "mode": { "type": "string", "enum": ["single_use", "time_limited"] },
+        "invitedLabel": { "type": "string", "maxLength": 160 },
+        "targetMemberId": { "type": "string", "maxLength": 128 },
+        "targetMemberName": { "type": "string", "maxLength": 120 },
+        "targetUsername": { "type": "string", "maxLength": 80 },
+        "createdByMemberId": { "type": "string", "maxLength": 128 },
+        "createdByMemberName": { "type": "string", "maxLength": 120 },
+        "expiresAt": { "type": "string", "maxLength": 64 },
+        "maxUses": { "type": "number" },
+        "usedCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "used", "revoked", "expired"] },
+        "createdAt": { "type": "string", "maxLength": 64 },
+        "lastUsedAt": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "token",
+        "purpose",
+        "mode",
+        "invitedLabel",
+        "createdByMemberId",
+        "createdByMemberName",
+        "maxUses",
+        "usedCount",
+        "status",
+        "createdAt"
+      ]
+    },
+    "ActivityLog": {
+      "title": "ActivityLog",
+      "description": "Audit log entry for vault events.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "actorId": { "type": "string", "maxLength": 128 },
+        "actorName": { "type": "string", "maxLength": 120 },
+        "actionType": { "type": "string", "maxLength": 80 },
+        "details": { "type": "string", "maxLength": 500 },
+        "deviceInfo": { "type": "string", "maxLength": 200 },
+        "timestamp": { "type": "string", "maxLength": 64 }
+      },
+      "required": [
+        "id",
+        "actorId",
+        "actorName",
+        "actionType",
+        "details",
+        "deviceInfo",
+        "timestamp"
+      ]
+    }
+  },
+  "firestore": {
+    "/vaultConfig/{configId}": {
+      "schema": "VaultConfig",
+      "description": "Singleton vault configuration document (/vaultConfig/default)."
+    },
+    "/members/{memberId}": {
+      "schema": "Member",
+      "description": "Family members and administrators with E2E wrapped encryption keys."
+    },
+    "/devices/{deviceId}": {
+      "schema": "Device",
+      "description": "Paired devices and their hardware certificates."
+    },
+    "/passwords/{passwordId}": {
+      "schema": "PasswordRecord",
+      "description": "E2E encrypted shared and private password records."
+    },
+    "/invitations/{invitationId}": {
+      "schema": "VaultInvitation",
+      "description": "Invitation and account recovery tokens."
+    },
+    "/activityLogs/{logId}": {
+      "schema": "ActivityLog",
+      "description": "Audit log entries."
+    }
+  }
+}
