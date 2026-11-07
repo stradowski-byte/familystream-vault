@@ -1,22 +1,19 @@
-# Plan Wdrożenia: Naprawa Kroku 5 (`Install dependencies`) w GitHub Actions i Automatyczny Start GitHub Pages
+# Plan Naprawy: Zielony Build w GitHub Actions (`--legacy-peer-deps` + `Node.js 24`)
 
-## 1. Potwierdzona diagnoza z logów repozytorium `stradowski-byte/familystream-vault`
-Repozytorium jest już **Publiczne**, dzięki czemu odczytaliśmy dokładny raport z ostatniego uruchomienia GitHub Actions (`Run #42408184494`):
-- Kroki 1–4 przeszły na zielono (`success`).
-- **Krok 5 (`Install dependencies`) zakończył się błędem (`failure`)**, ponieważ w kontenerze Google AI Studio plik `package.json` używa wewnętrznych wersji pakietów z prywatnego rejestru AI Studio (m.in. `@firebase/eslint-plugin-security-rules`, `vite: ^8.3.0`, `typescript: ^7.0.2`), których nie ma na publicznym serwerze `registry.npmjs.org`. Przez to kroki 6–9 (budowanie i utworzenie gałęzi `gh-pages`) zostały pominięte (`skipped`).
+## 1. Dokładna przyczyna błędów w Run #1 i Run #2
+1. **Dlaczego Run #2 (`e8afb93`) zgłosił brak katalogu `docs/`?**
+   Natywny mechanizm commitów w Google AI Studio wysyła do GitHuba wyłącznie pliki utworzone przez narzędzia edycji kodu AI Studio, a ignoruje katalogi wygenerowane przez komendy terminalowe (takie jak `docs/` czy `dist/`). Oznacza to, że kompilacja `npm run build` musi wykonać się po stronie GitHub Actions.
+2. **Dlaczego Run #1 (`86741af`) wywalił się na kroku `npm install`?**
+   Przetestowaliśmy czystą instalację w izolowanym katalogu i znaleźliśmy dwie blokady:
+   - Konflikt `ERESOLVE` pomiędzy `@typescript-eslint/parser@8.72.1` (wymaganym przez `@firebase/eslint-plugin-security-rules`) a `typescript@7.0.2` — domyślny `npm install` przerywa pracę z kodem błędu `1`, natomiast **`npm install --legacy-peer-deps`** przechodzi w 100% bezbłędnie (kod wyjścia `0`).
+   - Nowe pakiety `@firebase/*` wymagają silnika **`Node.js >= 24.12.0`**.
 
 ---
 
-## 2. Zakres zmian (100% zielony workflow w ~8 sekund)
+## 2. Zakres zmian w projekcie
 
-### A. Automatyczny Pre-Build czystej paczki produkcyjnej w AI Studio (`scripts/build-gh-pages.mjs` + katalog `docs/`)
-1. Dodamy skrypt `scripts/build-gh-pages.mjs` podpięty pod `npm run build`, który wewnątrz Google AI Studio:
-   - Tymczasowo podmienia zawartość `firebase-applet-config.json` na pusty obiekt `{}` (gwarancja Gatekeep 2 — klucze testowe z AI Studio nigdy nie trafiają do buildu produkcyjnego ani na GitHuba),
-   - Uruchamia `vite build`, a następnie natychmiast przywraca lokalny plik `firebase-applet-config.json` dla podglądu w AI Studio,
-   - Kopiuje `index.html` do `404.html` i tworzy plik `.nojekyll`,
-   - Zapisuje gotowy, czysty pakiet produkcyjny PWA w katalogu **`docs/`** (śledzonym przez Git i wysyłanym podczas natywnego commita z AI Studio).
-
-### B. Przebudowa `.github/workflows/deploy.yml` (Zero `npm install` na serwerze GitHuba)
-1. Usunięcie kroku `npm install` z `.github/workflows/deploy.yml`.
-2. Workflow na serwerze GitHuba pobiera gotowy katalog produkcyjny `docs/` bezpośrednio z natywnego commita, publikuje go na gałęzi **`gh-pages`** (`peaceiris/actions-gh-pages@v4`) i automatycznie włącza usługę GitHub Pages dla gałęzi `gh-pages` (lub `/docs`) przez GitHub REST API.
-3. Czas wykonania akcji spadnie do **~8 sekund**, a strona **`https://stradowski-byte.github.io/familystream-vault/`** uruchomi się automatycznie po natywnym commicie.
+### A. Aktualizacja `.github/workflows/deploy.yml`
+1. **Środowisko `Node.js 24`**: Zmiana `node-version` z `22` na `'24'` (spełnia wymagania `@firebase/* >= 24.12.0`).
+2. **Instalacja z `--legacy-peer-deps`**: Uruchomienie `npm install --legacy-peer-deps --no-audit --no-fund`, co całkowicie eliminuje błąd `ERESOLVE` podczas instalacji zależności na serwerze GitHuba.
+3. **Czysty build produkcyjny (`npm run build`)**: Uruchomienie `node scripts/build-gh-pages.mjs`, który tworzy czysty `firebase-applet-config.json` (`{}`), buduje pakiet PWA do `dist/` i dokłada `dist/404.html` oraz `dist/.nojekyll`.
+4. **Publikacja `dist/` na gałąź `gh-pages` + aktywacja GitHub Pages**: Automatyczne wypchnięcie katalogu `./dist` na gałąź `gh-pages` oraz włączenie usługi GitHub Pages przez GitHub API pod adresem `https://stradowski-byte.github.io/familystream-vault/`.

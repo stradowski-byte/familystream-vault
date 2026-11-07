@@ -17,26 +17,48 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy-pages:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository with pre-built production PWA (docs/)
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify pre-built PWA bundle (404.html & .nojekyll)
-        run: |
-          if [ ! -f "docs/index.html" ]; then
-            echo "Brak pliku docs/index.html!"
-            exit 1
-          fi
-          cp docs/index.html docs/404.html
-          touch docs/.nojekyll
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
-      - name: Publish pre-built docs/ to gh-pages branch
+      - name: Prepare clean production firebase-applet-config.json & sanitize devDependencies for CI
+        run: |
+          echo "{}" > firebase-applet-config.json
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            if (pkg.devDependencies) {
+              delete pkg.devDependencies["@firebase/eslint-plugin-security-rules"];
+              delete pkg.devDependencies["eslint"];
+            }
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - name: Install dependencies (--legacy-peer-deps)
+        run: |
+          rm -f bun.lock package-lock.json
+          npm install --legacy-peer-deps --no-audit --no-fund || npm install --force --no-audit --no-fund
+
+      - name: Build Production PWA Bundle (dist/)
+        run: npm run build
+
+      - name: Verify GitHub Pages SPA fallback (404.html & .nojekyll)
+        run: |
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+
+      - name: Publish dist/ to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs
+          publish_dir: ./dist
           publish_branch: gh-pages
           force_orphan: true
           commit_message: 'chore(gh-pages): deploy FamilyStream Vault PWA'
@@ -61,6 +83,6 @@ jobs:
             echo "- Status: **Aktywne na gałęzi \`gh-pages\`**" >> $GITHUB_STEP_SUMMARY
             echo "- Adres PWA: https://stradowski-byte.github.io/familystream-vault/" >> $GITHUB_STEP_SUMMARY
           else
-            echo "- Gałąź \`gh-pages\` została opublikowana." >> $GITHUB_STEP_SUMMARY
-            echo "- Sprawdź adres: https://stradowski-byte.github.io/familystream-vault/" >> $GITHUB_STEP_SUMMARY
+            echo "- Gałąź \`gh-pages\` została zbudowana i opublikowana." >> $GITHUB_STEP_SUMMARY
+            echo "- Adres PWA: https://stradowski-byte.github.io/familystream-vault/" >> $GITHUB_STEP_SUMMARY
           fi

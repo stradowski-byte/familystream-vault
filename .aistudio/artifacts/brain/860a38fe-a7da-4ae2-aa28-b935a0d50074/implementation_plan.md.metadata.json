@@ -1,6 +1,6 @@
 {
-  "summary":  "Zaktualizowany plan po upublicznieniu repozytorium stradowski-byte/familystream-vault: eliminacja błędu w Kroku 5 (Install dependencies) poprzez automatyczny pre-build czystej paczki produkcyjnej PWA (docs/) w AI Studio oraz publikację na gh-pages w 8 sekund bez wywoływania npm install na serwerze GitHuba.",
-  "updatedAt":  "2026-11-07T20:06:13.566235489Z",
+  "summary":  "Plan naprawy workflow .github/workflows/deploy.yml na podstawie dokładnych logów Run #1 i Run #2: użycie Node.js 24 oraz flagi npm install --legacy-peer-deps (rozwiązującej konflikt ERESOLVE z typescript@7.0.2), budowanie dist/ przez scripts/build-gh-pages.mjs i publikacja na gałąź gh-pages.",
+  "updatedAt":  "2026-11-07T20:14:28.142264484Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
