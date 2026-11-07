@@ -1,75 +1,365 @@
-# FIREBASE_BLUEPRINT_GUIDE.md — Kompletny Wzorzec Architektury Firebase, Autoryzacji Rodzinnej i PWA dla Projektów Google AI Studio
+# FIREBASE_BLUEPRINT_GUIDE.md — Kompletny Wzorzec Architektury, Migracji z Google Drive na Firebase Cloud Firestore oraz Natywnego CI/CD GitHub Pages dla Projektów Google AI Studio
 
-Ten dokument stanowi **kompletną, samowystarczalną specyfikację architektoniczną oraz bibliotekę gotowego kodu źródłowego**. Został stworzony na bazie wypracowanego i przetestowanego w boju wdrożenia w aplikacji **FamilyStream Vault**.
+Ten dokument stanowi **kompletną, samowystarczalną specyfikację architektoniczną, instrukcję migracyjną krok po kroku oraz bibliotekę gotowego kodu źródłowego (1:1)**. Został stworzony i przetestowany produkcyjnie w aplikacji **FamilyStream Vault**.
 
 > [!TIP]
-> **Jak użyć tego dokumentu w nowym projekcie Google AI Studio?**
-> 1. Załącz ten plik (`FIREBASE_BLUEPRINT_GUIDE.md`) do czatu w nowym projekcie AI Studio (lub wklej jego zawartość).
-> 2. Skopiuj poniższy **Rozdział 1: Gotowy Master Prompt dla AI Studio**, wpisz temat swojej nowej aplikacji (np. *Domowy Budżet*, *Wspólna Lista Zakupów*, *Planer Rodzinny*, *Domowa Apteczka*) i wyślij.
-> 3. Agent AI Studio odtworzy całą wielośrodowiskową architekturę Firebase, system zaproszeń z zaszytą konfiguracją, przekazywanie sesji PWA (`CacheStorage Handoff`), certyfikację urządzeń oraz reguły bezpieczeństwa Zero-Trust Firestore.
+> **Jak użyć tego dokumentu jutro w drugim projekcie Google AI Studio?**
+> 1. Pobierz ten plik z repozytorium GitHub (`FIREBASE_BLUEPRINT_GUIDE.md`) i załącz go do czatu w drugim projekcie Google AI Studio (lub wklej jego treść).
+> 2. Napisz krótki komunikat:
+>    **„Przeczytaj załączony dokument `FIREBASE_BLUEPRINT_GUIDE.md` i wykonaj pełną migrację tej aplikacji według Rozdziału 1 (Wariant B), Rozdziału 2 (Migracja z Google Drive na Firebase) oraz Rozdziału 3 (Przejście na Natywny GitHub AI Studio + GitHub Actions `gh-pages`), zachowując całą logikę biznesową i widoki naszej aplikacji.”**
+> 3. Agent AI Studio automatycznie usunie starą obsługę Google Drive oraz wbudowane w aplikację commity GitHub, wdroży architekturę **Firebase Cloud Firestore (`onSnapshot`)**, opcjonalne ładowanie `firebase-applet-config.json`, skrypt `scripts/build-gh-pages.mjs` oraz bezbłędny workflow `.github/workflows/deploy.yml`.
 
 ---
 
 ## Spis Treści
 
-1. [Gotowy Master Prompt dla AI Studio (Kopiuj-Wklej)](#1-gotowy-master-prompt-dla-ai-studio-kopiuj-wklej)
-2. [Architektura Wielośrodowiskowa (AI Studio Dev vs. GitHub Pages Prod PWA)](#2-architektura-wielośrodowiskowa-ai-studio-dev-vs-github-pages-prod-pwa)
-3. [Hybrydowy Model Tożsamości: Administrator (Google) + Domownicy (Login/Hasło + Anonymous Auth)](#3-hybrydowy-model-tożsamości-administrator-google--domownicy-loginhasło--anonymous-auth)
-4. [Samowystarczalne Linki Zaproszeniowe (`?invite=...&fb=...`) i Mostek PWA CacheStorage](#4-samowystarczalne-linki-zaproszeniowe-invitefb-i-mostek-pwa-cachestorage)
-5. [Schemat 6 Kolekcji Bazowych i Idempotentny Bootstrapper](#5-schemat-6-kolekcji-bazowych-i-idempotentny-bootstrapper)
-6. [Kompletny Kod Wzorcowy: `src/lib/firebase.ts`](#6-kompletny-kod-wzorcowy-srclibfirebasets)
-7. [Kompletny Kod Wzorcowy: `src/lib/firestoreVaultService.ts`](#7-kompletny-kod-wzorcowy-srclibfirestorevaultservicets)
-8. [Kompletny Kod Wzorcowy: Obsługa Linków Zaproszeniowych i PWA Handoff](#8-kompletny-kod-wzorcowy-obsługa-linków-zaproszeniowych-i-pwa-handoff)
-9. [Kompletne Reguły Bezpieczeństwa: `firestore.rules`](#9-kompletne-reguły-bezpieczeństwa-firestorerules)
-10. [Checklista Konfiguracji Projektu w Konsoli Firebase](#10-checklista-konfiguracji-projektu-w-konsoli-firebase)
-11. [5 Filarów Utwardzenia Pentestowego (Zero-Plaintext Storage, CSP, GCP API Key Restrictions, Sourcemap Off, Zero-State Logout)](#11-5-filarów-utwardzenia-pentestowego-zero-plaintext-storage-csp-gcp-api-key-restrictions-sourcemap-off-zero-state-logout)
+1. [Gotowe Master Prompty dla AI Studio (Wariant A: Nowy Projekt | Wariant B: Automatyczna Migracja Istniejącego Projektu)](#1-gotowe-master-prompty-dla-ai-studio-wariant-a-nowy-projekt--wariant-b-automatyczna-migracja-istniejącego-projektu)
+2. [KROK PO KROKU: Migracja z Google Drive (GDrive API / JSON) na Firebase Cloud Firestore (`onSnapshot`)](#2-krok-po-kroku-migracja-z-google-drive-gdrive-api--json-na-firebase-cloud-firestore-onsnapshot)
+3. [KROK PO KROKU: Przejście z Wbudowanego w Aplikację GitHuba (PAT) na Natywną Integrację GitHub w AI Studio + GitHub Actions (`gh-pages`)](#3-krok-po-kroku-przejście-z-wbudowanego-w-aplikację-githuba-pat-na-natywną-integrację-github-w-ai-studio--github-actions-gh-pages)
+4. [Architektura Wielośrodowiskowa (AI Studio Dev vs. GitHub Pages Prod PWA)](#4-architektura-wielośrodowiskowa-ai-studio-dev-vs-github-pages-prod-pwa)
+5. [Hybrydowy Model Tożsamości: Administrator (Google) + Użytkownicy/Domownicy (Login/Hasło + Anonymous Auth)](#5-hybrydowy-model-tożsamości-administrator-google--użytkownicydomownicy-loginhasło--anonymous-auth)
+6. [Samowystarczalne Linki Zaproszeniowe (`?invite=...&fb=...`) i Mostek PWA CacheStorage](#6-samowystarczalne-linki-zaproszeniowe-invitefb-i-mostek-pwa-cachestorage)
+7. [Schemat 6 Kolekcji Bazowych i Idempotentny Bootstrapper](#7-schemat-6-kolekcji-bazowych-i-idempotentny-bootstrapper)
+8. [Kompletny Kod Wzorcowy: `src/lib/firebase.ts` (z opcjonalnym `import.meta.glob`)](#8-kompletny-kod-wzorcowy-srclibfirebasets-z-opcjonalnym-importmetaglob)
+9. [Kompletny Kod Wzorcowy: `src/lib/firestoreVaultService.ts`](#9-kompletny-kod-wzorcowy-srclibfirestorevaultservicets)
+10. [Kompletny Kod Wzorcowy: Obsługa Linków Zaproszeniowych i PWA Handoff](#10-kompletny-kod-wzorcowy-obsługa-linków-zaproszeniowych-i-pwa-handoff)
+11. [Kompletne Reguły Bezpieczeństwa: `firestore.rules`](#11-kompletne-reguły-bezpieczeństwa-firestorerules)
+12. [Checklista Konfiguracji Projektu w Konsoli Firebase i na GitHub.com](#12-checklista-konfiguracji-projektu-w-konsoli-firebase-i-na-githubcom)
+13. [8 Filarów Utwardzenia Pentestowego, Stabilności i Ergonomii (Zero-Plaintext Storage, CSP, Tarcza Prywatności, Brute-Force Lockout, k-Anonymity, Rollback)](#13-8-filarów-utwardzenia-pentestowego-stabilności-i-ergonomii-zero-plaintext-storage-csp-tarcza-prywatności-brute-force-lockout-k-anonymity-rollback)
 
 ---
 
-## 1. Gotowy Master Prompt dla AI Studio (Kopiuj-Wklej)
+## 1. Gotowe Master Prompty dla AI Studio (Wariant A: Nowy Projekt | Wariant B: Automatyczna Migracja Istniejącego Projektu)
 
-Skopiuj poniższy blok do nowego projektu w Google AI Studio wraz z tym plikiem:
+### Wariant B (Najważniejszy do migracji istniejącej aplikacji jutro):
+Skopiuj poniższy blok do swojego drugiego projektu w Google AI Studio wraz z plikiem `FIREBASE_BLUEPRINT_GUIDE.md`:
 
 ```markdown
-Zbuduj aplikację [WPISZ NAZWĘ I OPIS NOWEJ APLIKACJI] wykorzystując w 100% wzorzec architektoniczny Firebase, autoryzacji wieloużytkownikowej i PWA opisany w załączonym dokumencie `FIREBASE_BLUEPRINT_GUIDE.md`.
+Przeczytaj dokładnie załączony dokument `FIREBASE_BLUEPRINT_GUIDE.md` i przeprowadź kompleksową migrację tej aplikacji w dwóch obszarach, zachowując w 100% jej logikę domenową, widoki i funkcje biznesowe:
 
-Wymagania architektoniczne (obowiązkowe do wdrożenia 1:1 wg wzorca):
-1. Środowisko Dual-Environment (`src/lib/firebase.ts`):
-   - W środowisku deweloperskim AI Studio (`*.run.app`, `localhost`) aplikacja automatycznie korzysta z wbudowanego `firebase-applet-config.json` i domyślnie ustawia rolę urządzenia jako `admin`.
-   - W środowisku produkcyjnym (np. GitHub Pages `*.github.io`) aplikacja NIE używa kluczy testowych z AI Studio — korzysta z konfiguracji zapisanej w `localStorage` (`fsv_custom_firebase_config_v1`) wgranej przez Administratora (akceptując zarówno czysty JSON, jak i surowy snippet JS `const firebaseConfig = { ... };` prosto z Firebase Console) lub zdekodowanej automatycznie z parametru `&fb=` w linku zaproszeniowym domownika.
-2. Hybrydowa Autoryzacja i Sesja Kryptograficzna:
-   - Główny Administrator loguje się przez Google OAuth (`signInWithPopup`) i jego UID jest zapisywany w `/vaultConfig/default.adminUid`.
-   - Domownicy logują się swoim loginem i hasłem (lub biometrią WebAuthn), a pod spodem `ensureFirebaseAuthSession()` automatycznie zestawia trwałą sesję `signInAnonymously(auth)` (`browserLocalPersistence`). `request.auth.uid` domownika jest zapisywany w polu `googleUid` dokumentu `/members/{memberId}` oraz dodawany do `allowedMemberIds` udostępnionych rekordów.
-3. Samowystarczalne Linki Zaproszeniowe i Ratunkowe (`?invite=<token>&fb=<base64url>`):
-   - Link zaproszeniowy wygenerowany przez Administratora zawiera token zaproszenia oraz zakodowaną w Base64URL aktywną konfigurację Firebase (`&fb=...`).
-   - Przycisk „Wyślij” na telefonie używa `navigator.share({ title, url })` przekazując wyłącznie czysty adres URL bez dodatkowego tekstu, aby komunikatory (WhatsApp, Messenger, SMS) nie psuły linku.
-   - Parser wejściowy `extractInviteAndFbFromInput` wyciąga parametry `invite` oraz `fb` za pomocą wyrażeń regularnych nawet z wiadomości zawierających dodatkowy tekst.
-   - Po otwarciu linku w przeglądarce mobilnej token oraz parametr `fb` są zapisywane w `localStorage` oraz w `CacheStorage` (`fsv-pwa-handoff-cache-v1`), dzięki czemu po kliknięciu „Zainstaluj aplikację PWA” na ekranie głównym telefonu zainstalowana aplikacja automatycznie przejmuje konfigurację Firebase i token zaproszenia.
-   - Na ekranie zaproszenia domownika zawsze widoczny jest przycisk „Ponów weryfikację linku” oraz standardowy formularz logowania domownika (login + hasło), aby wygaśnięcie lub zużycie linku nigdy nie blokowało możliwości zalogowania.
-4. Synchronizacja Real-Time i Bezpieczeństwo (`src/lib/firestoreVaultService.ts` + `firestore.rules`):
-   - Subskrypcja `onSnapshot` czeka na gotowość `request.auth.uid` przed podpięciem listenerów.
-   - Administrator pobiera całą kolekcję głównych rekordów, a Domownik wykonuje zapytanie z filtrem `where('allowedMemberIds', 'array-contains', uid)`.
-   - Podczas tworzenia nowego wspólnego wpisu domyślnie zaznaczony jest wyłącznie twórca wpisu („Tylko ja”), a wybór dodatkowych domowników odbywa się z rozwijanej listy multi-select.
-   - Po pierwszym logowaniu Administratora funkcja `ensureBaseCollectionsInitializedInFirestore` idempotentnie i nieinwazyjnie inicjalizuje brakujące kolekcje bazowe (`vaultConfig`, `members`, `devices`, główna kolekcja rekordów, `invitations`, `activityLogs`).
-   - Na każdym ekranie w prawym górnym rogu znajduje się kompaktowy przycisk przełączania motywu Jasny/Ciemny zapisywany trwale na urządzeniu w `localStorage`.
-5. Pięć Filarów Utwardzenia Pentestowego i Optymalizacji React (Obowiązkowe):
-   - Zero jawnych kluczy w Storage: klucze DEK zapisywane w `localStorage` (sesja i biometria) muszą być owinięte kryptograficznie (`ENC[AES-256-GCM:iv:cipher]`) przez `wrapLocalDeviceKeysPayload` powiązane ze sprzętową sygnaturą urządzenia. Surowy klucz żyje wyłącznie w RAM (`useState`).
-   - Aktywna weryfikacja `hardwareSignatureHash`: funkcja `verifyDeviceHardwareSignatureMatch` weryfikuje zgodność odcisku przeglądarki/urządzenia (`HW-XXXX-XXXX-XXXX`) z zatwierdzonym dokumentem w kolekcji `devices`.
-   - Anti-XSS i CSP: zero użyć `dangerouslySetInnerHTML`, walidacja protokołów URL (`sanitizeSafeHttpUrl` dopuszczający wyłącznie `https:` i `http:`) oraz meta-tag `Content-Security-Policy` w `index.html`.
-   - Blokada Source Maps: jawne `build: { sourcemap: false, minify: 'esbuild' }` w `vite.config.ts` oraz wykluczenie plików `.map` podczas publikacji na GitHub.
-   - Zero-State Logout: wylogowanie i Auto-Lock natychmiastowo zerują tablice danych i mapy odszyfrowanych rekordów w stanie Reacta oraz czyści schowek systemowy.
-   - Optymalizacja React: każde wywołanie `onAuthStateChanged` i `onSnapshot` musi znajdować się w `useEffect` z funkcją czyszczącą (`return () => unsubscribe()`), a karty rekordów na listach muszą być opakowane w `React.memo` i posiadać unikalny atrybut `key={record.id}`.
+CZĘŚĆ 1 — MIGRACJA Z GOOGLE DRIVE / LOKALNYCH PLIKÓW NA FIREBASE CLOUD FIRESTORE (`onSnapshot` Real-Time):
+1. Całkowicie usuń z kodu aplikacyjnego i serwerowego starą synchronizację opartą o Google Drive REST API (endpointy GDrive, tokeny OAuth `drive.file`/`drive.appdata`, ręczne odpytywanie i scalanie plików JSON na Dysku Google).
+2. Wdróż architekturę Dual-Environment w `src/lib/firebase.ts` zgodnie z Rozdziałem 8:
+   - Użyj opcjonalnego ładowania `import.meta.glob('../../firebase-applet-config.json', { eager: true })`, aby w środowisku Google AI Studio (`*.run.app`, `localhost`) aplikacja automatycznie korzystała z bazy testowej, a przy braku pliku (np. na GitHubie) kompilowała się bez błędów.
+   - Na hostingu produkcyjnym (`*.github.io`) aplikacja korzysta wyłącznie z konfiguracji wgranej przez Administratora do `localStorage` (obsługując zarówno surowy kod JS `const firebaseConfig = { ... };` skopiowany z Firebase Console, jak i JSON) lub zdekodowanej automatycznie z parametru `&fb=` w linku zaproszeniowym.
+3. Zmapuj dotychczasowe struktury danych aplikacji na kolekcje Cloud Firestore z subskrypcją w czasie rzeczywistym (`onSnapshot`), hybrydowym uwierzytelnianiem (Administrator przez Google OAuth `signInWithPopup` + członkowie/użytkownicy przez `signInAnonymously(auth)` z `browserLocalPersistence`), samowystarczalnymi linkami zaproszeniowymi (`?invite=...&fb=...` + mostek `CacheStorage` dla PWA) oraz idempotentnym zakładaniem kolekcji bazowych (`ensureBaseCollectionsInitializedInFirestore`).
+4. Zastąp dawny eksport na Google Drive lokalnym, szyfrowanym eksportem/importem pełnej kopii zapasowej bazy do pliku (`.enc` / `.json`) w zakładce Kopie i Konfiguracja.
+
+CZĘŚĆ 2 — CAŁKOWITE USUNIĘCIE WBUDOWANEGO W APLIKACJĘ GITHUBA I PRZEJŚCIE NA NATYWNĄ INTEGRACJĘ GITHUB W AI STUDIO + GITHUB ACTIONS (`gh-pages`):
+1. Całkowicie usuń z interfejsu aplikacji oraz z `server.ts` własną obsługę commitów i tokenów GitHub PAT:
+   - Usuń komponent zakładki GitHub z UI, klienta API GitHub z frontendu, typy `GitHubSyncConfig`/`GitHubPushResult` oraz przycisk zakładki GitHub z paska nawigacji (`TopBar`).
+   - Wyczyść `server.ts` z wszystkich endpointów `/api/github/*`, obsługi `data/github-deploy-meta.json` oraz zmiennej `GITHUB_PAT` w `.env.example`, zostawiając czysty, lekki serwer Express + Vite na porcie 3000.
+   - Usuń domeny `https://api.github.com` i `https://*.github.io` z `Content-Security-Policy` w `index.html`.
+2. Skonfiguruj automatyczne budowanie i publikację GitHub Pages (`gh-pages`) wyzwalane po każdym natywnym commicie z Google AI Studio zgodnie z Rozdziałem 3:
+   - Utwórz skrypt `scripts/build-gh-pages.mjs` i podepnij go w `package.json` jako `"build": "node scripts/build-gh-pages.mjs"` (skrypt na czas `vite build` podmienia `firebase-applet-config.json` na `{}`, generuje `dist/404.html` oraz `dist/.nojekyll`, a w bloku `finally` przywraca lokalny `firebase-applet-config.json`).
+   - Upewnij się, że w `vite.config.ts` ustawione jest `base: './'`, a w `index.html` ikony używają ścieżek względnych `./`.
+   - Utwórz plik `.github/workflows/deploy.yml` używający `Node.js 24`, usuwający na czas CI konfliktowy pakiet `@firebase/eslint-plugin-security-rules`, instalujący zależności przez `npm install --legacy-peer-deps --no-audit --no-fund`, uruchamiający `npm run build` i publikujący katalog `./dist` na gałąź `gh-pages` (`peaceiris/actions-gh-pages@v4`).
+   - W zakładce „Kopie i Konfiguracja” dodaj sekcję aktualnych linków do repozytorium GitHub (w tym przycisk zmiany widoczności z Private na Public w Danger Zone, link do GitHub Actions, ustawień GitHub Pages oraz bezpośrednie skróty do konsoli Firebase).
 ```
 
 ---
 
-## 2. Architektura Wielośrodowiskowa (AI Studio Dev vs. GitHub Pages Prod PWA)
+### Wariant A (Budowa zupełnie nowej aplikacji od zera):
+```markdown
+Zbuduj aplikację [WPISZ NAZWĘ I OPIS NOWEJ APLIKACJI] wykorzystując w 100% wzorzec architektoniczny Firebase Cloud Firestore (`onSnapshot`), autoryzacji wieloużytkownikowej, PWA oraz natywnego wdrożenia GitHub Pages (`.github/workflows/deploy.yml` + `scripts/build-gh-pages.mjs`) opisany w załączonym dokumencie `FIREBASE_BLUEPRINT_GUIDE.md`. Nie twórz w aplikacji żadnej własnej zakładki do commitów GitHub — aplikacja korzysta wyłącznie z natywnej integracji GitHub wbudowanej w Google AI Studio.
+```
+
+---
+
+## 2. KROK PO KROKU: Migracja z Google Drive (GDrive API / JSON) na Firebase Cloud Firestore (`onSnapshot`)
+
+W starszych projektach dane aplikacji były trzymane w jednym pliku JSON na Dysku Google (`Google Drive API v3`, zakresy OAuth `https://www.googleapis.com/auth/drive.file` lub `drive.appdata`), co powodowało problemy z wygasaniem tokenów OAuth co 60 minut, konfliktami zapisu przy pracy wielu urządzeń oraz koniecznością ręcznego klikania „Synchronizuj z Google Drive”.
+
+Poniżej znajduje się dokładna procedura zastąpienia Google Drive bazą **Firebase Cloud Firestore**:
+
+### Krok 2.1. Co należy całkowicie usunąć z projektu (Demontaż warstwy Google Drive)
+1. **Usunięcie bibliotek i skryptów Google Drive**:
+   - Usuń ładowanie skryptu `https://apis.google.com/js/api.js` (`gapi.client.drive`) oraz `https://accounts.google.com/gsi/client` (`google.accounts.oauth2.initTokenClient`), jeśli służyły do pobierania tokenu dostępowego do Google Drive.
+   - Usuń moduły typu `googleDriveService.ts`, `driveSync.ts`, `gdriveBackup.ts` oraz endpointy `/api/gdrive/*` z `server.ts`.
+   - Usuń ze stanu aplikacji (`App.tsx`) pola takie jak `driveFileId`, `lastDriveSyncAt`, `isSyncingDrive`, `driveAccessToken` oraz przyciski „Zapisz na Google Drive / Pobierz z Google Drive”.
+2. **Zastąpienie kopii zapasowych z Google Drive lokalnymi szyfrowanymi plikami (`.enc` / `.json`)**:
+   - Zamiast trzymać kopię na Dysku Google, w zakładce „Kopie i Konfiguracja” zostaw wyłącznie eksport/import zaszyfrowanego pliku lokalnego (`AES-256-GCM`), który pobiera cały stan z kolekcji Firestore i pozwala go w każdej chwili odtworzyć jednym kliknięciem (`replaceFullVaultStateInFirestore`).
+
+### Krok 2.2. Mapowanie dawnego pliku JSON z Google Drive na kolekcje Cloud Firestore
+Dawny pojedynczy obiekt JSON z Google Drive (np. `{ config, users, devices, items, logs }`) rozbijamy na osobne kolekcje w Firestore:
+
+| Dawne pole w pliku JSON na Google Drive | Docelowa kolekcja w Cloud Firestore | Sposób synchronizacji w nowej architekturze |
+| :--- | :--- | :--- |
+| `config` / `settings` | `vaultConfig/default` (pojedynczy dokument) | `onSnapshot(doc(db, 'vaultConfig', 'default'))` |
+| `users` / `members` | `members/{memberId}` | `onSnapshot(collection(db, 'members'))` |
+| `devices` | `devices/{deviceId}` | `onSnapshot(collection(db, 'devices'))` |
+| `items` / `records` / `passwords` / `workouts` *(główne dane aplikacji)* | `{mainCollection}/{recordId}` (np. `passwords/{id}`) | `onSnapshot(collection(db, ...))` (lub z filtrem `where('allowedMemberIds', 'array-contains', uid)`) |
+| `invitations` | `invitations/{invitationId}` | `onSnapshot(collection(db, 'invitations'))` |
+| `logs` / `history` | `activityLogs/{logId}` | `onSnapshot(query(collection(db, 'activityLogs'), orderBy('timestamp', 'desc'), limit(150)))` |
+
+### Krok 2.3. Zastąpienie operacji zapisu pliku Drive pojedynczymi zapisami dokumentów (`setDoc` / `deleteDoc`)
+- Zamiast nadpisywać cały plik JSON po każdej edycji rekordu, każda akcja użytkownika (dodanie rekordu, edycja, usunięcie, zmiana ustawień) wywołuje bezpośrednio `setDoc(doc(db, 'nazwaKolekcji', record.id), sanitizeForFirestore(record))` lub `deleteDoc(...)`.
+- Nasłuchiwacz `onSnapshot` automatycznie i w ułamku sekundy rozsyła zmianę do wszystkich otwartych telefonów i komputerów bez żadnego ręcznego odświeżania!
+- **Ważna uwaga techniczna Firestore**: Cloud Firestore odrzuca pola o wartości `undefined`. Przed każdym wywołaniem `setDoc` przepuść obiekt przez prostą funkcję czyszczącą:
+  ```typescript
+  function stripUndefined<T>(obj: T): T {
+    return JSON.parse(JSON.stringify(obj)) as T;
+  }
+  ```
+
+### Krok 2.4. Provisioning bazy Firebase w Google AI Studio
+1. W nowym lub migrowanym projekcie w Google AI Studio wywołaj narzędzie `set_up_firebase` (`platform: 'web'`, `requestedProducts: ['firestore']`), które utworzy bazę testową dla środowiska AI Studio oraz plik `firebase-applet-config.json`.
+2. W pliku `src/lib/firebase.ts` użyj opcjonalnego importu `import.meta.glob('../../firebase-applet-config.json', { eager: true })` (pełny kod w Rozdziale 8), dzięki czemu w AI Studio aplikacja działa od razu na bazie testowej, a po wypchnięciu na GitHub Pages wymaga wgrania produkcyjnego configu Firebase (Gatekeep 2).
+
+---
+
+## 3. KROK PO KROKU: Przejście z Wbudowanego w Aplikację GitHuba (PAT) na Natywną Integrację GitHub w AI Studio + GitHub Actions (`gh-pages`)
+
+Dawniej aplikacje miały wbudowaną zakładkę „GitHub” w panelu Administratora, w której wklejało się token `GITHUB_PAT`, a `server.ts` ręcznie wysyłał bloby przez GitHub REST API.
+Obecnie **Google AI Studio posiada natywną integrację z GitHubem** (ikona GitHub w górnym pasku AI Studio). Całą obsługę GitHuba wyrzucamy więc z kodu aplikacji, a budowanie wersji produkcyjnej dla **GitHub Pages (`gh-pages`)** powierzamy automatycznemu workflow **GitHub Actions (`.github/workflows/deploy.yml`)**.
+
+### Krok 3.1. Co należy całkowicie usunąć z kodu aplikacji
+1. **Usuń komponent i klienta GitHub z frontendu**:
+   - Usuń pliki `src/components/AdminTab4GitHubAndUpdates.tsx` oraz `src/lib/githubDeployClient.ts`.
+   - W `src/types/vault.ts` (lub odpowiedniku typów) usuń interfejsy `GitHubSyncConfig` oraz `GitHubPushResult`.
+   - W `src/components/TopBar.tsx` usuń `'github'` z unii zakładek (`AdminTabId`), usuń przycisk zakładki GitHub oraz prop `isAiStudioPreview`.
+   - W `src/App.tsx` usuń import i renderowanie `AdminTab4GitHubAndUpdates`.
+2. **Wyczyść `server.ts`, `.env.example` oraz `index.html`**:
+   - W `.env.example` usuń zmienną `GITHUB_PAT=""`.
+   - W `index.html` w meta-tagu `Content-Security-Policy` usuń `https://api.github.com https://*.github.io` z dyrektywy `connect-src`.
+   - Zastąp cały plik `server.ts` czystym, minimalnym serwerem Express + Vite (poniżej gotowy kod 1:1):
+
+```typescript
+// Pełny, czysty kod pliku /server.ts (bez żadnej obsługi GitHub API ani ZIP):
+import express from 'express';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createServer as createViteServer } from 'vite';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
+
+  app.use(express.json({ limit: '5mb' }));
+
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: {
+        middlewareMode: true,
+        hmr: false,
+        watch: null,
+      },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Web Server running on http://0.0.0.0:${PORT}`);
+  });
+}
+
+startServer();
+```
+
+---
+
+### Krok 3.2. Utworzenie skryptu budującego `scripts/build-gh-pages.mjs` (Ochrona Gatekeep 2 + SPA Fallback)
+
+Utwórz plik `/scripts/build-gh-pages.mjs`. Skrypt ten gwarantuje, że podczas kompilacji produkcyjnej plik `firebase-applet-config.json` jest pustym obiektem `{}` (dzięki czemu testowe klucze z AI Studio nigdy nie trafią na GitHub Pages), generuje `dist/404.html` (dla linków zaproszeniowych `?invite=...&fb=...`) oraz `dist/.nojekyll`, a po zakończeniu budowania przywraca oryginalny `firebase-applet-config.json` w środowisku AI Studio:
+
+```javascript
+// Plik: /scripts/build-gh-pages.mjs
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { build as buildVite } from 'vite';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootDir = path.resolve(__dirname, '..');
+
+const firebaseConfigPath = path.join(rootDir, 'firebase-applet-config.json');
+const distDir = path.join(rootDir, 'dist');
+const docsDir = path.join(rootDir, 'docs');
+
+async function runCleanProductionBuild() {
+  const hadOriginalConfig = fs.existsSync(firebaseConfigPath);
+  const originalConfigContent = hadOriginalConfig
+    ? fs.readFileSync(firebaseConfigPath, 'utf-8')
+    : null;
+
+  try {
+    // 1. Wyczyść testowe klucze Firebase przed kompilacją produkcyjną (Gatekeep 2)
+    fs.writeFileSync(firebaseConfigPath, '{}\n', 'utf-8');
+
+    // 2. Zbuduj pakiet produkcyjny Vite do katalogu dist/
+    await buildVite({
+      root: rootDir,
+      logLevel: 'info',
+    });
+
+    // 3. Dodaj fallback SPA dla GitHub Pages (404.html) oraz .nojekyll
+    const indexHtmlPath = path.join(distDir, 'index.html');
+    if (fs.existsSync(indexHtmlPath)) {
+      fs.copyFileSync(indexHtmlPath, path.join(distDir, '404.html'));
+    }
+    fs.writeFileSync(path.join(distDir, '.nojekyll'), '', 'utf-8');
+
+    // 4. Skopiuj czysty build również do docs/
+    if (fs.existsSync(docsDir)) {
+      fs.rmSync(docsDir, { recursive: true, force: true });
+    }
+    fs.cpSync(distDir, docsDir, { recursive: true });
+    console.log(
+      'Clean production bundle prepared in dist/ and docs/ (Gatekeep 2 verified).'
+    );
+  } finally {
+    // 5. Zawsze przywróć oryginalny firebase-applet-config.json dla podglądu w AI Studio
+    if (hadOriginalConfig && originalConfigContent !== null) {
+      fs.writeFileSync(firebaseConfigPath, originalConfigContent, 'utf-8');
+    }
+  }
+}
+
+runCleanProductionBuild().catch((err) => {
+  console.error('Production build failed:', err);
+  process.exit(1);
+});
+```
+
+W pliku `package.json` ustaw skrypt `"build"`:
+```json
+  "scripts": {
+    "dev": "tsx server.ts",
+    "start": "node --import tsx server.ts",
+    "build": "node scripts/build-gh-pages.mjs",
+    "preview": "vite preview",
+    "clean": "rm -rf dist docs server.js",
+    "lint": "tsc --noEmit"
+  }
+```
+
+Upewnij się też, że:
+- w `vite.config.ts` ustawione jest `base: './'` (oraz w `VitePWA` pola `id: './'`, `start_url: './'`, `scope: './'`),
+- w `index.html` linki do ikon mają ścieżki względne (`href="./apple-touch-icon.png"`, `href="./icon.svg"`), aby aplikacja działała poprawnie w podkatalogu `https://<twoj-login>.github.io/<nazwa-repozytorium>/`.
+
+---
+
+### Krok 3.3. Utworzenie pliku `.github/workflows/deploy.yml` (Rozwiązanie problemów `Node.js 24` i `ERESOLVE` w AI Studio)
+
+> [!WARNING]
+> **Dlaczego zwykły workflow z `npm install` i `Node 20/22` wywala błąd w projektach z Google AI Studio?**
+> 1. Pakiety `@firebase/*` instalowane w AI Studio wymagają silnika **`Node.js >= 24.12.0`**.
+> 2. Pakiet deweloperski `@firebase/eslint-plugin-security-rules` z `package.json` w AI Studio wymusza zależność `@typescript-eslint/parser` (`typescript < 6.1.0`), podczas gdy w `package.json` znajduje się `typescript: ^7.0.2`. Zwykłe `npm install` na serwerze GitHub Actions kończy się błędem `ERESOLVE` (Exit code 1).
+>
+> **Rozwiązanie zastosowane w poniższym workflow**:
+> Używamy `node-version: '24'`, przed instalacją na maszynie CI automatycznie usuwamy z `package.json` niepotrzebny do budowania pakiet `@firebase/eslint-plugin-security-rules` oraz `eslint`, i uruchamiamy `npm install --legacy-peer-deps --no-audit --no-fund`.
+
+Skopiuj poniższy plik 1:1 do `/.github/workflows/deploy.yml`:
+
+```yaml
+name: Deploy PWA to GitHub Pages (gh-pages)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages-deploy'
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Prepare clean production firebase-applet-config.json & sanitize devDependencies for CI
+        run: |
+          echo "{}" > firebase-applet-config.json
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            if (pkg.devDependencies) {
+              delete pkg.devDependencies["@firebase/eslint-plugin-security-rules"];
+              delete pkg.devDependencies["eslint"];
+            }
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+
+      - name: Install dependencies (--legacy-peer-deps)
+        run: |
+          rm -f bun.lock package-lock.json
+          npm install --legacy-peer-deps --no-audit --no-fund || npm install --force --no-audit --no-fund
+
+      - name: Build Production PWA Bundle (dist/)
+        run: npm run build
+
+      - name: Verify GitHub Pages SPA fallback (404.html & .nojekyll)
+        run: |
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+
+      - name: Publish dist/ to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          force_orphan: true
+          commit_message: 'chore(gh-pages): deploy production PWA'
+
+      - name: Summary of GitHub Pages Deployment
+        run: |
+          echo "### GitHub Pages Deployment (gh-pages)" >> $GITHUB_STEP_SUMMARY
+          echo "- Gałąź \`gh-pages\` została zbudowana i opublikowana." >> $GITHUB_STEP_SUMMARY
+          echo "- Adres ustawień Pages: https://github.com/${{ github.repository }}/settings/pages" >> $GITHUB_STEP_SUMMARY
+```
+
+---
+
+### Krok 3.4. Dwie jednorazowe czynności na GitHub.com po pierwszym natywnym commicie z AI Studio
+
+Gdy podepniesz nowe repozytorium przez natywną integrację GitHub w Google AI Studio i wykonasz pierwszy commit:
+
+1. **Przestaw repozytorium z Private (`🔒`) na Public**:
+   - Natywna integracja Google AI Studio domyślnie tworzy repozytorium jako **Prywatne (`Private`)**. Darmowe konto GitHub wymaga repozytorium **Publicznego (`Public`)**, aby udostępnić stronę GitHub Pages.
+   - Wejdź w: `https://github.com/<twoj-login>/<nazwa-repo>/settings#danger-zone-heading`
+   - Na samym dole w sekcji **Danger Zone** kliknij **Change repository visibility → Change to public** i potwierdź. *(Ponieważ `deploy.yml` czyści `firebase-applet-config.json` do `{}`, w repozytorium nie ma żadnych kluczy ani haseł).*
+2. **Włącz gałąź `gh-pages` w ustawieniach GitHub Pages**:
+   - Poczekaj ok. 40 sekund, aż w zakładce `Actions` (`https://github.com/<twoj-login>/<nazwa-repo>/actions`) pierwszy przebieg zaświeci się na **zielono (`✓`)** — utworzy on gałąź `gh-pages`.
+   - Wejdź w: `https://github.com/<twoj-login>/<nazwa-repo>/settings/pages`
+   - W sekcji **Build and deployment → Branch** zmień wartość z **`None`** na **`gh-pages`** (`/ (root)`) i kliknij **Save**.
+   - Po 30 sekundach Twoja aplikacja PWA działa pod adresem `https://<twoj-login>.github.io/<nazwa-repo>/`, a każdy kolejny natywny commit z AI Studio aktualizuje ją całkowicie automatycznie!
+
+---
+
+## 4. Architektura Wielośrodowiskowa (AI Studio Dev vs. GitHub Pages Prod PWA)
 
 ### Problem, który rozwiązujemy
-Aplikacje tworzone w Google AI Studio posiadają automatycznie generowany plik `firebase-applet-config.json` wskazujący na testową bazę danych AI Studio. Gdy jednak wdrażasz aplikację jako produkcyjne PWA na własny hosting (np. **GitHub Pages**), chcesz:
+Aplikacje tworzone w Google AI Studio posiadają automatycznie generowany plik `firebase-applet-config.json` wskazujący na testową bazę danych AI Studio (`ai-studio-...`). Gdy jednak wdrażasz aplikację jako produkcyjne PWA na **GitHub Pages**, chcesz:
 1. W oknie podglądu **AI Studio** nadal wygodnie testować aplikację na bazie testowej.
-2. Na **GitHub Pages** korzystać ze swojego prywatnego, produkcyjnego projektu Firebase bez konieczności ręcznego edytowania kodu przed każdym wdrożeniem.
-3. Sprawić, aby zaproszeni domownicy (np. rodzina) **nie musieli nic wiedzieć o Firebase ani wklejać żadnych plików JSON** — klikają jedynie link zaproszeniowy od Administratora.
+2. Na **GitHub Pages** korzystać ze swojego prywatnego, produkcyjnego projektu Firebase bez konieczności ręcznego edytowania kodu przed każdym commitem.
+3. Sprawić, aby zaproszeni użytkownicy/domownicy **nie musieli nic wiedzieć o Firebase ani wklejać żadnych plików JSON** — klikają jedynie link zaproszeniowy od Administratora.
 
 ### Diagram Przepływu Konfiguracji
 
@@ -84,7 +374,7 @@ Aplikacje tworzone w Google AI Studio posiadają automatycznie generowany plik `
                         ▼                               ▼
         ┌───────────────────────────────┐ ┌────────────────────────────────────┐
         │ ŚRODOWISKO DEV (AI Studio)    │ │ ŚRODOWISKO PROD (GitHub Pages PWA) │
-        │ • Używa wbudowanego pliku     │ │ 1. Sprawdza ?fb=... w URL          │
+        │ • Używa opcjonalnego globa    │ │ 1. Sprawdza ?fb=... w URL          │
         │   firebase-applet-config.json │ │ 2. Sprawdza CacheStorage Handoff   │
         │ • Domyślna rola: 'admin'      │ │ 3. Sprawdza localStorage           │
         └───────────────────────────────┘ └─────────────────┬──────────────────┘
@@ -93,7 +383,7 @@ Aplikacje tworzone w Google AI Studio posiadają automatycznie generowany plik `
                                   Jest konfiguracja                   Brak konfiguracji
                                           ▼                                   ▼
                           ┌───────────────────────────────┐   ┌───────────────────────────────┐
-                          │ Inicjalizacja Firebase SDK    │   │ Ekran powitalny:              │
+                          │ Inicjalizacja Firebase SDK    │   │ Ekran powitalny (Gatekeep 2): │
                           │ • Rola 'admin' -> Logowanie   │   │ • Domownik: Wklej link od     │
                           │   Google / Zarządzanie        │   │   Admina (?invite=...&fb=...) │
                           │ • Rola 'member' -> Logowanie  │   │ • Admin: Wklej snippet JS lub │
@@ -101,85 +391,44 @@ Aplikacje tworzone w Google AI Studio posiadają automatycznie generowany plik `
                           └───────────────────────────────┘   └───────────────────────────────┘
 ```
 
-### Kluczowe reguły implementacyjne
-- **Klucze w `localStorage`**:
-  - `fsv_custom_firebase_config_v1` — przechowuje zwalidowany obiekt `CustomFirebaseConfig`.
-  - `fsv_device_instance_role_v1` — przechowuje rolę urządzenia (`'admin'` lub `'member'`), dzięki czemu urządzenie domownika od razu widzi prosty ekran logowania domownika, a nie techniczny panel konfiguracji Administratora.
-- **Uniwersalny Parser Konfiguracji (`parseAndValidateFirebaseConfigInput`)**:
-  - W konsoli Firebase użytkownik kopiuje kod JavaScript (`const firebaseConfig = { apiKey: "...", ... };`), w którym klucze nie mają cudzysłowów wymaganych przez `JSON.parse`. Nasz parser wyciąga pola wyrażeniami regularnymi bezpośrednio z surowego tekstu JS lub z obiektu JSON.
-- **Automatyczna Diagnostyka (`diagnoseFirebaseAuthConfiguration`)**:
-  - W razie błędu `auth/configuration-not-found` odpytuje endpoint `https://www.googleapis.com/identitytoolkit/v3/relyingparty/getProjectConfig?key=...` i dokładnie wskazuje, czy w konsoli Firebase nie włączono dostawcy Google/Anonymous, czy domena `*.github.io` nie została dodana do *Authorized domains*, czy też klucz `apiKey` pochodzi z innego projektu niż `projectId`.
+---
+
+## 5. Hybrydowy Model Tożsamości: Administrator (Google) + Użytkownicy/Domownicy (Login/Hasło + Anonymous Auth)
+
+1. **Główny Administrator** loguje się kontem Google za pomocą `signInWithPopup(auth, googleProvider)`, co wiąże jego `request.auth.uid` z dokumentem głównym `/vaultConfig/default.adminUid`.
+2. **Domownicy / Użytkownicy** logują się prostym loginem i hasłem utworzonym po kliknięciu linku zaproszeniowego, a następnie odblokowują aplikację biometrią WebAuthn.
+3. Pod spodem każde urządzenie domownika wywołuje `ensureFirebaseAuthSession()`, które automatycznie zestawia trwałą sesję `signInAnonymously(auth)` (`browserLocalPersistence`). Wygenerowany identyfikator `request.auth.uid` jest zapisywany w polu `googleUid` dokumentu `/members/{memberId}` oraz dodawany do tablicy `allowedMemberIds` udostępnionych rekordów.
 
 ---
 
-## 3. Hybrydowy Model Tożsamości: Administrator (Google) + Domownicy (Login/Hasło + Anonymous Auth)
+## 6. Samowystarczalne Linki Zaproszeniowe (`?invite=...&fb=...`) i Mostek PWA CacheStorage
 
-### Dlaczego model hybrydowy?
-- **Główny Administrator** potrzebuje silnego uwierzytelnienia właściciela chmury (konto Google za pomocą `signInWithPopup(auth, googleProvider)`), które wiąże jego `request.auth.uid` z dokumentem głównym `/vaultConfig/default.adminUid`.
-- **Domownicy (np. mama, tata, dzieci)** nie powinni być zmuszani do logowania przez OAuth ani zakładania kont w Firebase Console. Chcą zalogować się prostym loginem i hasłem utworzonym po kliknięciu linku zaproszeniowego, a następnie odblokowywać aplikację odciskiem palca / FaceID (WebAuthn).
-- Jednocześnie **Cloud Firestore wymaga kryptograficznego `request.auth != null`**, aby reguły bezpieczeństwa (`firestore.rules`) mogły chronić prywatne wpisy i weryfikować uprawnienia na poziomie dokumentu!
-
-### Jak działa połączenie `Member` + `signInAnonymously`?
-1. Każde urządzenie domownika przed wykonaniem jakiejkolwiek operacji w Firestore wywołuje `ensureFirebaseAuthSession()`.
-2. Jeśli na urządzeniu nie ma aktywnej sesji Firebase Auth, funkcja automatycznie wywołuje `signInAnonymously(auth)` z trwałą pamięcią `browserLocalPersistence`.
-3. Wygenerowany przez Firebase identyfikator `request.auth.uid` jest zapisywany w dokumencie domownika `/members/{memberId}` w polu `googleUid`.
-4. Kiedy wpis (np. hasło w kolekcji `/passwords/{passwordId}`) jest udostępniany domownikowi, tablica `allowedMemberIds` przechowuje zarówno identyfikator logiczny `member.id`, jak i kryptograficzny UID `member.googleUid` (`request.auth.uid`).
-5. Dzięki temu reguła w `firestore.rules`:
-   ```javascript
-   allow list: if isSignedIn() && (isAdmin() || isMemberOwner(existing().ownerId) || (request.auth.uid in existing().allowedMemberIds));
-   ```
-   oraz zapytanie klienckie:
-   ```typescript
-   query(collection(db, 'passwords'), where('allowedMemberIds', 'array-contains', user.uid))
-   ```
-   działają z pełną separacją kryptograficzną na serwerach Google!
-
----
-
-## 4. Samowystarczalne Linki Zaproszeniowe (`?invite=...&fb=...`) i Mostek PWA CacheStorage
-
-### Anatomia Linku Zaproszeniowego
-Gdy Administrator tworzy link zaproszeniowy (dla nowego konta lub odzyskiwania konta), aplikacja buduje URL zawierający dwa parametry:
+Gdy Administrator tworzy link zaproszeniowy, aplikacja buduje URL zawierający dwa parametry:
 ```
 https://twoj-login.github.io/twoja-aplikacja/?invite=inv_a1b2c3d4e5f6&fb=eyJhcGlLZXkiOiJBSXph...
 ```
 - `invite` — unikalny token dokumentu w kolekcji `/invitations/{invitationId}`.
 - `fb` — zminimalizowany obiekt `CustomFirebaseConfig` zakodowany w formacie **Base64URL** (`encodeFirebaseConfigForInviteUrl`).
-
-### Rozwiązanie 4 krytycznych problemów mobilnych
-
-1. **Komunikatory psujące linki (WhatsApp / Messenger / SMS)**:
-   - Jeśli do `navigator.share({ text: "Cześć, oto link...", url })` przekażesz pole `text`, wiele komunikatorów na Androidzie skleja tekst z adresem URL bez spacji lub ucina parametr `&fb=`.
-   - **Zasada**: W `navigator.share` przekazuj **wyłącznie `title` oraz czysty `url`** (`await navigator.share({ title: 'Zaproszenie', url })`).
-2. **Wklejanie całej wiadomości z komunikatora**:
-   - Użytkownik często kopiuje całą wiadomość SMS/WhatsApp razem z tekstem powitania.
-   - **Zasada**: Funkcja `extractInviteAndFbFromInput(raw)` używa wyrażeń regularnych (`/[?&]invite=([a-zA-Z0-9_-]+)/i` oraz `/[?&]fb=([a-zA-Z0-9_=-]+)/i`), dzięki czemu bezbłędnie wyłuskuje token i konfigurację Firebase z dowolnego wklejonego tekstu.
-3. **Izolacja pamięci między przeglądarką a zainstalowanym PWA (iOS / Android)**:
-   - Kiedy domownik otwiera link zaproszeniowy w przeglądarce Chrome/Safari i klika „Zainstaluj aplikację na ekranie głównym”, nowo otwarta ikona PWA może nie widzieć parametrów URL z karty przeglądarki.
-   - **Zasada**: Przy starcie aplikacji zapisujemy `inviteToken` oraz `fbParam` zarówno w `localStorage`, jak i w współdzielonym dla całego originu obiekcie `window.caches.open('fsv-pwa-handoff-cache-v1')` pod kluczem `/__fsv_invite_handoff__`. Zainstalowana aplikacja PWA przy pierwszym uruchomieniu odczytuje ten cache i automatycznie konfiguruje Firebase oraz otwiera formularz zaproszenia.
-4. **Nigdy nie blokuj ekranu logowania domownika błędem linku**:
-   - Jeśli domownik kliknie w stary lub już wykorzystany link z historii czatu, aplikacja wyświetla czytelny komunikat z przyciskiem **„Ponów weryfikację linku”**, ale **poniżej zawsze renderuje standardowy formularz logowania (Login + Hasło)**, aby zarejestrowany domownik mógł od razu się zalogować.
+- Przy starcie aplikacji w przeglądarce mobilnej `invite` oraz `fb` są zapisywane jednocześnie w `localStorage` oraz w `window.caches.open('fsv-pwa-handoff-cache-v1')` pod kluczem `/__fsv_invite_handoff__`, dzięki czemu po kliknięciu „Zainstaluj aplikację PWA” nowo otwarta aplikacja z ekranu głównego telefonu automatycznie przejmuje konfigurację Firebase i token zaproszenia.
 
 ---
 
-## 5. Schemat 6 Kolekcji Bazowych i Idempotentny Bootstrapper
-
-Każda aplikacja oparta na tym wzorcu korzysta z 6 kolekcji w Cloud Firestore:
+## 7. Schemat 6 Kolekcji Bazowych i Idempotentny Bootstrapper
 
 | Kolekcja | Klucz dokumentu | Przeznaczenie | Dostęp `read` | Dostęp `write` |
 | :--- | :--- | :--- | :--- | :--- |
 | `vaultConfig` | `default` | Konfiguracja globalna instancji, `adminUid`, `adminMemberId`, domyślny motyw i kategorie | Wszyscy zalogowani (`isSignedIn()`) | Create: pierwszy Admin (`!exists(...)`), Update: tylko `isAdmin()` |
 | `members` | `{memberId}` | Profile Administratora, Współadministratorów i Domowników, sole PBKDF2, klucze DEK i `googleUid` | Wszyscy zalogowani (`isSignedIn()`) | Admin lub właściciel profilu (`googleUid == request.auth.uid`) |
 | `devices` | `{deviceId}` | Zarejestrowane urządzenia, fingerprint sprzętowy, status (`approved`/`pending`/`revoked`), certyfikat `CERT-HW-...` | Wszyscy zalogowani (`isSignedIn()`) | Admin lub właściciel urządzenia |
-| `passwords` *(lub główna kolekcja danych)* | `{recordId}` | Główne rekordy aplikacji (wspólne `shared` z listą `allowedMemberIds` oraz prywatne `private` zaszyfrowane E2E AES-256-GCM) | Admin, właściciel lub osoba z `request.auth.uid in allowedMemberIds` | Admin, właściciel lub uprawniony domownik |
+| `passwords` *(lub główna kolekcja danych aplikacji)* | `{recordId}` | Główne rekordy aplikacji (wspólne `shared` z listą `allowedMemberIds` oraz prywatne `private` zaszyfrowane E2E AES-256-GCM) | Admin, właściciel lub osoba z `request.auth.uid in allowedMemberIds` | Admin, właściciel lub uprawniony domownik |
 | `invitations` | `{invitationId}` | Linki zaproszeniowe (`new_member`) i ratunkowe (`account_recovery`), jednorazowe lub czasowe 24h | Wszyscy zalogowani (`isSignedIn()`) | Admin, twórca lub domownik zużywający aktywne zaproszenie (`isConsumingActiveInvitation()`) |
 | `activityLogs` | `{logId}` | Dziennik audytowy zdarzeń bezpieczeństwa w czasie rzeczywistym | Tylko `isAdmin()` | Create: każdy zalogowany (`isSignedIn()`), Update/Delete: tylko `isAdmin()` |
 
 ---
 
-## 6. Kompletny Kod Wzorcowy: `src/lib/firebase.ts`
+## 8. Kompletny Kod Wzorcowy: `src/lib/firebase.ts` (z opcjonalnym `import.meta.glob`)
 
-Poniżej znajduje się pełny, gotowy do skopiowania kod modułu `src/lib/firebase.ts`:
+Zwróć uwagę na użycie `import.meta.glob('../../firebase-applet-config.json', { eager: true })` zamiast sztywnego statycznego importu — dzięki temu po natywnym commicie do repozytorium GitHub (gdzie `firebase-applet-config.json` jest w `.gitignore`) kompilacja nigdy nie zgłosi błędu brakującego pliku:
 
 ```typescript
 import { FirebaseApp, getApps, initializeApp } from 'firebase/app';
@@ -198,7 +447,10 @@ import {
   getDocFromServer,
   getFirestore,
 } from 'firebase/firestore';
-import bundledFirebaseConfigRaw from '../../firebase-applet-config.json';
+
+const optionalBundledConfigs = import.meta.glob<{
+  default?: Partial<CustomFirebaseConfig>;
+}>('../../firebase-applet-config.json', { eager: true });
 
 export interface CustomFirebaseConfig {
   apiKey: string;
@@ -216,7 +468,12 @@ export const LOCAL_FIREBASE_CONFIG_KEY = 'fsv_custom_firebase_config_v1';
 export const DEVICE_INSTANCE_ROLE_KEY = 'fsv_device_instance_role_v1';
 export const PWA_HANDOFF_CACHE_NAME = 'fsv-pwa-handoff-cache-v1';
 
-const bundledConfig = bundledFirebaseConfigRaw as Partial<CustomFirebaseConfig>;
+const rawBundledModule =
+  optionalBundledConfigs['../../firebase-applet-config.json'];
+const bundledConfig: Partial<CustomFirebaseConfig> =
+  (rawBundledModule?.default ??
+    (rawBundledModule as Partial<CustomFirebaseConfig> | undefined)) ||
+  {};
 
 function isAiStudioRuntime(): boolean {
   if (typeof window === 'undefined') return false;
@@ -329,7 +586,7 @@ export function parseAndValidateFirebaseConfigInput(
       jsonParsed = candidate as Record<string, unknown>;
     }
   } catch {
-    // Surowy snippet JS z Firebase Console jest obsługiwany bezpośrednio przez extractConfigField poniżej
+    // Surowy snippet JS z Firebase Console jest obsługiwany bezpośrednio przez extractConfigField
   }
 
   const apiKey = (
@@ -596,626 +853,63 @@ export async function testFirestoreConnection(): Promise<void> {
 
 ---
 
-## 7. Kompletny Kod Wzorcowy: `src/lib/firestoreVaultService.ts`
+## 9. Kompletny Kod Wzorcowy: `src/lib/firestoreVaultService.ts`
 
 Kluczowe wzorce w warstwie komunikacji z Cloud Firestore:
 1. **`handleFirestoreError`**: Ustrukturyzowane raportowanie błędów uprawnień z pełnym kontekstem `authInfo` oraz `operationType`.
 2. **`subscribeToVaultFirestoreRealtime`**: Dwustopniowa subskrypcja `onSnapshot` — najpierw czeka na aktywnego użytkownika (`onAuthStateChanged` / `ensureFirebaseAuthSession`), następnie odczytuje `/vaultConfig/default`, ustala czy `cfg.adminUid === user.uid` i podpina zapytania zależne od roli (`collection(db, 'passwords')` dla Admina vs `where('allowedMemberIds', 'array-contains', uid)` dla Domownika).
-3. **`verifyInvitationTokenInFirestore`**: Odporna weryfikacja tokenu zaproszenia z zapytaniem głównym (`where('token', '==', cleanToken)`) oraz fallbackiem po całej kolekcji `invitations` (niewrażliwym na wielkość liter lub spacje).
+3. **`verifyInvitationTokenInFirestore`**: Odporna weryfikacja tokenu zaproszenia z zapytaniem głównym (`where('token', '==', cleanToken)`) oraz fallbackiem po całej kolekcji `invitations`.
 4. **`ensureBaseCollectionsInitializedInFirestore`**: Idempotentna funkcja wywoływana po zalogowaniu Administratora, która sprawdza każdą z 6 kolekcji za pomocą `limit(1)` i tworzy dokument startowy tylko wtedy, gdy kolekcja jest pusta.
 
-```typescript
-// Fragment wzorcowy subskrypcji Real-Time oraz weryfikacji zaproszeń z src/lib/firestoreVaultService.ts:
-
-export function subscribeToVaultFirestoreRealtime(
-  callbacks: RealtimeVaultSnapshotCallbacks
-): Unsubscribe {
-  if (!isFirebaseConfigured() || !db || !auth) {
-    callbacks.onInitialSyncComplete?.();
-    return () => {};
-  }
-
-  let snapshotUnsubscribers: Unsubscribe[] = [];
-  let roleScopedUnsubscribers: Unsubscribe[] = [];
-  let attachedUid: string | null = null;
-  let attachedRoleScope: 'admin' | 'member' | null = null;
-  let initialConfigLoaded = false;
-  let initialMembersLoaded = false;
-  let notifiedInitial = false;
-  let isDisposed = false;
-
-  const checkInitialComplete = () => {
-    if (!notifiedInitial && initialConfigLoaded && initialMembersLoaded) {
-      notifiedInitial = true;
-      callbacks.onInitialSyncComplete?.();
-    }
-  };
-
-  const detachRoleScopedSnapshots = () => {
-    roleScopedUnsubscribers.forEach((u) => u());
-    roleScopedUnsubscribers = [];
-    attachedRoleScope = null;
-  };
-
-  const detachSnapshots = () => {
-    detachRoleScopedSnapshots();
-    snapshotUnsubscribers.forEach((u) => u());
-    snapshotUnsubscribers = [];
-    attachedUid = null;
-  };
-
-  const attachRoleScopedListeners = (uid: string, isVaultAdmin: boolean) => {
-    if (isDisposed) return;
-    const targetScope: 'admin' | 'member' = isVaultAdmin ? 'admin' : 'member';
-    if (attachedRoleScope === targetScope) return;
-    detachRoleScopedSnapshots();
-    attachedRoleScope = targetScope;
-
-    // Kolekcja głównych zasobów: Admin widzi wszystko, Domownik tylko rekordy z jego UID w allowedMemberIds
-    const passwordsRefOrQuery = isVaultAdmin
-      ? collection(db, 'passwords')
-      : query(
-          collection(db, 'passwords'),
-          where('allowedMemberIds', 'array-contains', uid)
-        );
-    roleScopedUnsubscribers.push(
-      onSnapshot(
-        passwordsRefOrQuery,
-        (snap) => {
-          const list = snap.docs.map((d) => ({
-            ...(d.data() as PasswordRecord),
-            id: d.id,
-          }));
-          callbacks.onPasswords(list);
-        },
-        (err) => {
-          if (auth.currentUser) {
-            handleFirestoreError(err, OperationType.LIST, 'passwords');
-          }
-        }
-      )
-    );
-
-    // Kolekcja logów aktywności: dostępna do odczytu wyłącznie dla Administratora
-    if (isVaultAdmin) {
-      const logsQuery = query(
-        collection(db, 'activityLogs'),
-        orderBy('timestamp', 'desc'),
-        limit(150)
-      );
-      roleScopedUnsubscribers.push(
-        onSnapshot(
-          logsQuery,
-          (snap) => {
-            const list = snap.docs.map((d) => ({
-              ...(d.data() as ActivityLog),
-              id: d.id,
-            }));
-            callbacks.onActivityLogs(list);
-          },
-          (err) => {
-            if (auth.currentUser) {
-              handleFirestoreError(err, OperationType.LIST, 'activityLogs');
-            }
-          }
-        )
-      );
-    } else {
-      callbacks.onActivityLogs([]);
-    }
-  };
-
-  const attachSnapshotsForUser = (user: User) => {
-    if (isDisposed || attachedUid === user.uid) return;
-    detachSnapshots();
-    attachedUid = user.uid;
-
-    snapshotUnsubscribers.push(
-      onSnapshot(
-        doc(db, 'vaultConfig', 'default'),
-        (snap) => {
-          const cfg = snap.exists() ? (snap.data() as VaultConfig) : null;
-          callbacks.onVaultConfig(cfg);
-          const isVaultAdmin = Boolean(cfg && cfg.adminUid === user.uid);
-          attachRoleScopedListeners(user.uid, isVaultAdmin);
-          initialConfigLoaded = true;
-          checkInitialComplete();
-        },
-        (err) => {
-          initialConfigLoaded = true;
-          checkInitialComplete();
-          if (auth.currentUser) {
-            handleFirestoreError(err, OperationType.GET, 'vaultConfig/default');
-          }
-        }
-      )
-    );
-
-    snapshotUnsubscribers.push(
-      onSnapshot(collection(db, 'members'), (snap) => {
-        callbacks.onMembers(
-          snap.docs.map((d) => ({ ...(d.data() as Member), id: d.id }))
-        );
-        initialMembersLoaded = true;
-        checkInitialComplete();
-      })
-    );
-
-    snapshotUnsubscribers.push(
-      onSnapshot(collection(db, 'devices'), (snap) => {
-        callbacks.onDevices(
-          snap.docs.map((d) =>
-            ensureDeviceHardwareCertificate({ ...(d.data() as Device), id: d.id })
-          )
-        );
-      })
-    );
-
-    snapshotUnsubscribers.push(
-      onSnapshot(collection(db, 'invitations'), (snap) => {
-        callbacks.onInvitations(
-          normalizeInvitationStatuses(
-            snap.docs.map((d) => ({ ...(d.data() as VaultInvitation), id: d.id }))
-          )
-        );
-      })
-    );
-  };
-
-  const unsubAuth = onAuthStateChanged(auth, (user) => {
-    if (isDisposed) return;
-    if (user) {
-      attachSnapshotsForUser(user);
-    } else {
-      detachSnapshots();
-    }
-  });
-
-  void ensureFirebaseAuthSession(false).then((user) => {
-    if (isDisposed) return;
-    if (user) {
-      attachSnapshotsForUser(user);
-    } else {
-      initialConfigLoaded = true;
-      initialMembersLoaded = true;
-      checkInitialComplete();
-    }
-  });
-
-  return () => {
-    isDisposed = true;
-    unsubAuth();
-    detachSnapshots();
-  };
-}
-```
-
-*(Pełna implementacja wszystkich metod CRUD, szyfrowania E2E AES-256-GCM oraz idempotentnej inicjalizacji kolekcji znajduje się w pliku `/src/lib/firestoreVaultService.ts` w tym repozytorium).*
+*(Pełna implementacja znajduje się w pliku `/src/lib/firestoreVaultService.ts` w tym repozytorium).*
 
 ---
 
-## 8. Kompletny Kod Wzorcowy: Obsługa Linków Zaproszeniowych i PWA Handoff
+## 10. Kompletny Kod Wzorcowy: Obsługa Linków Zaproszeniowych i PWA Handoff
 
-Poniższy kod odpowiada za:
-1. Wyciąganie `invite` oraz `fb` z każdego formatu tekstu lub URL-a (`extractInviteAndFbFromInput`).
-2. Przekazywanie tokenu i konfiguracji Firebase pomiędzy przeglądarką a zainstalowaną aplikacją PWA za pomocą `CacheStorage` (`saveInviteAndFbForPwaHandoff` / `loadInviteAndFbFromPwaHandoff`).
-3. Generowanie i wysyłanie czystego linku zaproszeniowego przez systemowe menu telefonu (`navigator.share({ title, url })`).
-
-```typescript
-const PWA_INVITE_HANDOFF_KEY = 'fsv_invite_token_v1';
-const PWA_FB_CONFIG_HANDOFF_KEY = 'fsv_invite_fb_param_v1';
-export const PWA_HANDOFF_CACHE_NAME = 'fsv-pwa-handoff-cache-v1';
-
-/**
- * Odporny parser wyciągający token zaproszenia (?invite=...) oraz zakodowaną konfigurację Firebase (&fb=...)
- * zarówno z czystego adresu URL, jak i z pełnej wiadomości skopiowanej z komunikatora (WhatsApp/Messenger/SMS).
- */
-export function extractInviteAndFbFromInput(raw: string): {
-  inviteToken: string;
-  fbParam: string;
-} {
-  const trimmed = raw.trim();
-  if (!trimmed) return { inviteToken: '', fbParam: '' };
-
-  // 1. Bezpośrednia ekstrakcja wyrażeniem regularnym
-  const invMatch = trimmed.match(/[?&]invite=([a-zA-Z0-9_-]+)/i);
-  const fbMatch = trimmed.match(/[?&]fb=([a-zA-Z0-9_=-]+)/i);
-  if (invMatch?.[1] || fbMatch?.[1]) {
-    return {
-      inviteToken: invMatch?.[1] ? decodeURIComponent(invMatch[1]).trim() : '',
-      fbParam: fbMatch?.[1] ? decodeURIComponent(fbMatch[1]).trim() : '',
-    };
-  }
-
-  // 2. Fallback przez obiekt URL
-  try {
-    const urlCandidateMatch = trimmed.match(/https?:\/\/[^\s"'<>]+/i);
-    const targetUrlStr = urlCandidateMatch
-      ? urlCandidateMatch[0]
-      : trimmed.startsWith('http')
-        ? trimmed
-        : `https://vault.local/${trimmed.replace(/^\//, '')}`;
-    if (targetUrlStr.includes('invite=') || targetUrlStr.includes('fb=')) {
-      const url = new URL(targetUrlStr);
-      return {
-        inviteToken: (url.searchParams.get('invite') || '').trim(),
-        fbParam: (url.searchParams.get('fb') || '').trim(),
-      };
-    }
-  } catch {
-    // ignore
-  }
-
-  // 3. Bezpośredni token (np. inv_a1b2c3d4e5f6)
-  const directTokenMatch = trimmed.match(/\b(inv_[a-zA-Z0-9_-]+)\b/i);
-  if (directTokenMatch?.[1]) {
-    return { inviteToken: directTokenMatch[1].trim(), fbParam: '' };
-  }
-
-  return { inviteToken: trimmed, fbParam: '' };
-}
-
-/**
- * Zapisuje token zaproszenia i parametr fb w localStorage oraz w CacheStorage,
- * aby po zainstalowaniu PWA na ekranie głównym (Add to Home Screen) aplikacja przejęła sesję.
- */
-export async function saveInviteAndFbForPwaHandoff(
-  inviteToken: string,
-  fbParam: string
-): Promise<void> {
-  try {
-    if (inviteToken) localStorage.setItem(PWA_INVITE_HANDOFF_KEY, inviteToken);
-    if (fbParam) localStorage.setItem(PWA_FB_CONFIG_HANDOFF_KEY, fbParam);
-  } catch {
-    // ignore
-  }
-  if (typeof window !== 'undefined' && 'caches' in window) {
-    try {
-      const cache = await window.caches.open(PWA_HANDOFF_CACHE_NAME);
-      await cache.put(
-        new Request('/__fsv_invite_handoff__'),
-        new Response(
-          JSON.stringify({
-            inviteToken: inviteToken || '',
-            fbParam: fbParam || '',
-          }),
-          { headers: { 'Content-Type': 'application/json' } }
-        )
-      );
-    } catch {
-      // ignore
-    }
-  }
-}
-
-export async function loadInviteAndFbFromPwaHandoff(): Promise<{
-  inviteToken: string;
-  fbParam: string;
-}> {
-  let inviteToken = '';
-  let fbParam = '';
-  try {
-    inviteToken = localStorage.getItem(PWA_INVITE_HANDOFF_KEY) || '';
-    fbParam = localStorage.getItem(PWA_FB_CONFIG_HANDOFF_KEY) || '';
-  } catch {
-    // ignore
-  }
-  if (
-    (!inviteToken || !fbParam) &&
-    typeof window !== 'undefined' &&
-    'caches' in window
-  ) {
-    try {
-      const cache = await window.caches.open(PWA_HANDOFF_CACHE_NAME);
-      const res = await cache.match(new Request('/__fsv_invite_handoff__'));
-      if (res) {
-        const data = (await res.json()) as {
-          inviteToken?: string;
-          fbParam?: string;
-        };
-        if (!inviteToken && data?.inviteToken) inviteToken = data.inviteToken;
-        if (!fbParam && data?.fbParam) fbParam = data.fbParam;
-      }
-    } catch {
-      // ignore
-    }
-  }
-  return { inviteToken, fbParam };
-}
-
-/**
- * Budowanie i wysyłanie czystego linku zaproszeniowego przez systemowe menu udostępniania telefonu:
- */
-export function buildInvitationUrl(token: string): string {
-  const base = `${window.location.origin}${window.location.pathname}`;
-  const fbEncoded = encodeFirebaseConfigForInviteUrl();
-  return fbEncoded
-    ? `${base}?invite=${encodeURIComponent(token)}&fb=${encodeURIComponent(fbEncoded)}`
-    : `${base}?invite=${encodeURIComponent(token)}`;
-}
-
-export async function shareInvitationUrlOnMobile(inv: VaultInvitation): Promise<void> {
-  const url = buildInvitationUrl(inv.token);
-  if (navigator.share) {
-    // KRYTYCZNE: Wysyłamy wyłącznie czysty URL bez pola `text`, aby komunikatory nie doklejały tekstu do adresu URL
-    await navigator.share({
-      title:
-        inv.purpose === 'account_recovery'
-          ? `Link ratunkowy (${inv.targetMemberName || inv.invitedLabel})`
-          : `Zaproszenie (${inv.invitedLabel})`,
-      url,
-    });
-  } else {
-    await navigator.clipboard.writeText(url);
-  }
-}
-```
+1. **`extractInviteAndFbFromInput(raw)`**: Wyciąga parametry `invite` oraz `fb` za pomocą wyrażeń regularnych zarówno z czystego URL-a, jak i z pełnej wiadomości skopiowanej z komunikatora (WhatsApp/Messenger/SMS).
+2. **`saveInviteAndFbForPwaHandoff` / `loadInviteAndFbFromPwaHandoff`**: Przekazuje token i konfigurację Firebase między przeglądarką a zainstalowaną aplikacją PWA przez `window.caches.open('fsv-pwa-handoff-cache-v1')`.
+3. **`navigator.share({ title, url })`**: Wysyła wyłącznie czysty adres URL bez pola `text`, aby komunikatory mobilne nie sklejały tekstu z linkiem.
 
 ---
 
-## 9. Kompletne Reguły Bezpieczeństwa: `firestore.rules`
+## 11. Kompletne Reguły Bezpieczeństwa: `firestore.rules`
 
-Poniższe reguły realizują architekturę **Zero-Trust ABAC** dla wszystkich 6 kolekcji:
-- weryfikują rolę Administratora poprzez `/vaultConfig/default.adminUid == request.auth.uid`,
-- weryfikują tożsamość Domownika poprzez `isMemberOwner(memberId)` (sprawdzając `googleUid == request.auth.uid`),
-- izolują odczyt i listowanie głównych rekordów (`/passwords/{passwordId}`) wyłącznie do właściciela, Administratora oraz osób znajdujących się w tablicy `allowedMemberIds`,
-- pozwalają nowemu domownikowi bezpiecznie oznaczyć aktywny link zaproszeniowy jako użyty (`isConsumingActiveInvitation()`),
-- walidują typy, klucze oraz rozmiary wszystkich pól.
-
-```javascript
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    function isValidId(id) {
-      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isAdmin() {
-      return isSignedIn() &&
-             exists(/databases/$(database)/documents/vaultConfig/default) &&
-             get(/databases/$(database)/documents/vaultConfig/default).data.adminUid == request.auth.uid;
-    }
-
-    function isMemberOwner(memberId) {
-      return isSignedIn() && (
-        request.auth.uid == memberId ||
-        (exists(/databases/$(database)/documents/members/$(memberId)) &&
-         get(/databases/$(database)/documents/members/$(memberId)).data.googleUid == request.auth.uid)
-      );
-    }
-
-    function isConsumingActiveInvitation() {
-      return existing().status == 'active' &&
-             incoming().token == existing().token &&
-             incoming().purpose == existing().purpose &&
-             incoming().mode == existing().mode &&
-             incoming().createdByMemberId == existing().createdByMemberId &&
-             incoming().usedCount == existing().usedCount + 1 &&
-             incoming().status in ['active', 'used'];
-    }
-
-    function isValidVaultConfig(data) {
-      return data.keys().hasAll(['initialized', 'adminUid', 'adminEmail', 'adminMemberId', 'templatesLoaded', 'categoriesJson', 'defaultTheme', 'clipboardClearSeconds', 'autoLockMinutes', 'createdAt', 'updatedAt']) &&
-      data.keys().hasOnly(['initialized', 'adminUid', 'adminEmail', 'adminMemberId', 'templatesLoaded', 'categoriesJson', 'defaultTheme', 'clipboardClearSeconds', 'autoLockMinutes', 'createdAt', 'updatedAt']) &&
-      data.initialized is bool && data.adminUid is string && data.adminUid.size() <= 128 && data.adminEmail is string && data.adminEmail.size() <= 256 && data.adminMemberId is string && data.adminMemberId.size() <= 128 && data.templatesLoaded is bool && data.categoriesJson is string && data.categoriesJson.size() <= 20000 && data.defaultTheme in ['dusk', 'linen'] && data.clipboardClearSeconds is number && data.clipboardClearSeconds >= 5 && data.clipboardClearSeconds <= 600 && data.autoLockMinutes is number && data.autoLockMinutes >= 1 && data.autoLockMinutes <= 1440 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64;
-    }
-
-    function isValidMember(data) {
-      return data.keys().hasAll(['id', 'fullName', 'username', 'passwordHash', 'pbkdf2Salt', 'wrappedMasterKey', 'vaultEscrowKey', 'mergedVaultKeysJson', 'role', 'status', 'googleUid', 'createdAt', 'updatedAt']) &&
-      data.keys().hasOnly(['id', 'fullName', 'username', 'passwordHash', 'pbkdf2Salt', 'wrappedMasterKey', 'vaultEscrowKey', 'mergedVaultKeysJson', 'role', 'coAdminPermissions', 'status', 'googleUid', 'invitedByToken', 'createdAt', 'updatedAt']) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120 && data.username is string && data.username.size() >= 1 && data.username.size() <= 80 && data.passwordHash is string && data.passwordHash.size() <= 512 && data.passwordHash.size() >= 1 && data.pbkdf2Salt is string && data.pbkdf2Salt.size() <= 256 && data.wrappedMasterKey is string && data.wrappedMasterKey.size() <= 2048 && data.vaultEscrowKey is string && data.vaultEscrowKey.size() <= 2048 && data.mergedVaultKeysJson is string && data.mergedVaultKeysJson.size() <= 20000 && data.role in ['admin', 'co_admin', 'member'] && data.status in ['active', 'pending', 'merged'] && data.googleUid is string && data.googleUid.size() <= 256 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64;
-    }
-
-    function isValidDevice(data) {
-      return data.keys().hasAll(['id', 'memberId', 'memberName', 'username', 'deviceFingerprint', 'deviceName', 'customLabel', 'clientMode', 'status', 'webAuthnCredentialId', 'requestedAt', 'lastSeenAt']) &&
-      data.keys().hasOnly(['id', 'memberId', 'memberName', 'username', 'deviceFingerprint', 'deviceName', 'customLabel', 'clientMode', 'hardwareModelOs', 'hardwareDeviceType', 'hardwareSignatureHash', 'deviceApprovalToken', 'deviceCertificateFingerprint', 'hardwareWrappedDek', 'certificateIssuedAt', 'status', 'webAuthnCredentialId', 'requestedAt', 'lastSeenAt']) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.memberId is string && data.memberId.size() >= 1 && data.memberId.size() <= 128 && data.memberName is string && data.memberName.size() <= 120 && data.username is string && data.username.size() <= 80 && data.deviceFingerprint is string && data.deviceFingerprint.size() <= 256 && data.deviceName is string && data.deviceName.size() <= 200 && data.customLabel is string && data.customLabel.size() <= 200 && data.clientMode in ['pwa', 'browser'] && data.status in ['approved', 'pending', 'revoked'] && data.webAuthnCredentialId is string && data.webAuthnCredentialId.size() <= 1024 && data.requestedAt is string && data.requestedAt.size() <= 64 && data.lastSeenAt is string && data.lastSeenAt.size() <= 64;
-    }
-
-    function isValidPasswordRecord(data) {
-      return data.keys().hasAll(['id', 'section', 'categoryId', 'serviceName', 'serviceUrl', 'login', 'passwordValue', 'encryptedPayload', 'keySalt', 'ownerId', 'ownerName', 'allowedMemberIds', 'createdAt', 'updatedAt', 'passwordUpdatedAt']) &&
-      data.keys().hasOnly(['id', 'section', 'categoryId', 'serviceName', 'serviceUrl', 'login', 'passwordValue', 'encryptedPayload', 'keySalt', 'ownerId', 'ownerName', 'allowedMemberIds', 'revealToAdmin', 'subAccountsJson', 'createdAt', 'updatedAt', 'passwordUpdatedAt']) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.section in ['shared', 'private'] && data.categoryId is string && data.categoryId.size() <= 128 && data.serviceName is string && data.serviceName.size() <= 200 && data.serviceUrl is string && data.serviceUrl.size() <= 500 && data.login is string && data.login.size() <= 256 && data.passwordValue is string && data.passwordValue.size() <= 2048 && data.encryptedPayload is string && data.encryptedPayload.size() <= 50000 && data.keySalt is string && data.keySalt.size() <= 256 && data.ownerId is string && data.ownerId.size() <= 128 && data.ownerName is string && data.ownerName.size() <= 120 && data.allowedMemberIds is list && data.allowedMemberIds.size() <= 100 && data.createdAt is string && data.createdAt.size() <= 64 && data.updatedAt is string && data.updatedAt.size() <= 64 && data.passwordUpdatedAt is string && data.passwordUpdatedAt.size() <= 64;
-    }
-
-    function isValidVaultInvitation(data) {
-      return data.keys().hasAll(['id', 'token', 'purpose', 'mode', 'invitedLabel', 'createdByMemberId', 'createdByMemberName', 'maxUses', 'usedCount', 'status', 'createdAt']) &&
-      data.keys().hasOnly(['id', 'token', 'purpose', 'mode', 'invitedLabel', 'targetMemberId', 'targetMemberName', 'targetUsername', 'createdByMemberId', 'createdByMemberName', 'expiresAt', 'maxUses', 'usedCount', 'status', 'createdAt', 'lastUsedAt']) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.token is string && data.token.size() >= 1 && data.token.size() <= 256 && data.purpose in ['new_member', 'account_recovery'] && data.mode in ['single_use', 'time_limited'] && data.invitedLabel is string && data.invitedLabel.size() <= 160 && data.createdByMemberId is string && data.createdByMemberId.size() <= 128 && data.createdByMemberName is string && data.createdByMemberName.size() <= 120 && data.maxUses is number && data.maxUses >= 1 && data.maxUses <= 1000 && data.usedCount is number && data.usedCount >= 0 && data.usedCount <= 1000 && data.status in ['active', 'used', 'revoked', 'expired'] && data.createdAt is string && data.createdAt.size() <= 64;
-    }
-
-    function isValidActivityLog(data) {
-      return data.keys().hasAll(['id', 'actorId', 'actorName', 'actionType', 'details', 'deviceInfo', 'timestamp']) &&
-      data.keys().hasOnly(['id', 'actorId', 'actorName', 'actionType', 'details', 'deviceInfo', 'timestamp']) &&
-      data.id is string && data.id.size() >= 1 && data.id.size() <= 128 && data.actorId is string && data.actorId.size() <= 128 && data.actorName is string && data.actorName.size() <= 120 && data.actionType is string && data.actionType.size() <= 80 && data.details is string && data.details.size() <= 500 && data.deviceInfo is string && data.deviceInfo.size() <= 200 && data.timestamp is string && data.timestamp.size() <= 64;
-    }
-
-    match /vaultConfig/{configId} {
-      allow get: if isSignedIn() && isValidId(configId);
-      allow list: if isSignedIn() && request.time != null;
-      allow create: if isSignedIn() &&
-                    configId == 'default' &&
-                    !exists(/databases/$(database)/documents/vaultConfig/default) &&
-                    isValidVaultConfig(incoming()) &&
-                    incoming().adminUid == request.auth.uid;
-      allow update: if isAdmin() &&
-                    isValidId(configId) &&
-                    isValidVaultConfig(incoming()) &&
-                    (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt);
-      allow delete: if isAdmin() && isValidId(configId);
-    }
-
-    match /members/{memberId} {
-      allow get: if isSignedIn() && isValidId(memberId);
-      allow list: if isSignedIn() && request.time != null;
-      allow create: if isSignedIn() && isValidId(memberId) && isValidMember(incoming()) && incoming().id == memberId;
-      allow update: if isSignedIn() &&
-                    isValidId(memberId) &&
-                    isValidMember(incoming()) &&
-                    (!('id' in existing()) || incoming().id == existing().id) && (
-                      isAdmin() ||
-                      (
-                        (existing().googleUid == request.auth.uid || existing().id == request.auth.uid || (existing().googleUid == '' && incoming().googleUid == request.auth.uid)) &&
-                        incoming().role == existing().role
-                      )
-                    );
-      allow delete: if isSignedIn() && isValidId(memberId) && (isAdmin() || existing().googleUid == request.auth.uid || existing().id == request.auth.uid);
-    }
-
-    match /devices/{deviceId} {
-      allow get: if isSignedIn() && isValidId(deviceId);
-      allow list: if isSignedIn() && request.time != null;
-      allow create: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && incoming().id == deviceId;
-      allow update: if isSignedIn() && isValidId(deviceId) && isValidDevice(incoming()) && (!('id' in existing()) || incoming().id == existing().id) && (isAdmin() || isMemberOwner(existing().memberId));
-      allow delete: if isSignedIn() && isValidId(deviceId) && (isAdmin() || isMemberOwner(existing().memberId));
-    }
-
-    match /passwords/{passwordId} {
-      allow get: if isSignedIn() && isValidId(passwordId) && (isAdmin() || isMemberOwner(existing().ownerId) || (request.auth.uid in existing().allowedMemberIds));
-      allow list: if isSignedIn() && (isAdmin() || isMemberOwner(existing().ownerId) || (request.auth.uid in existing().allowedMemberIds));
-      allow create: if isSignedIn() && isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == passwordId;
-      allow update: if isSignedIn() && isValidId(passwordId) && isValidPasswordRecord(incoming()) && incoming().id == existing().id && (isAdmin() || isMemberOwner(existing().ownerId) || (existing().section == 'shared' && (request.auth.uid in existing().allowedMemberIds)));
-      allow delete: if isSignedIn() && isValidId(passwordId) && (isAdmin() || isMemberOwner(existing().ownerId));
-    }
-
-    match /invitations/{invitationId} {
-      allow get: if isSignedIn() && isValidId(invitationId);
-      allow list: if isSignedIn() && request.time != null;
-      allow create: if isSignedIn() && isValidId(invitationId) && isValidVaultInvitation(incoming()) && incoming().id == invitationId;
-      allow update: if isSignedIn() && isValidId(invitationId) && isValidVaultInvitation(incoming()) && incoming().id == existing().id && (isAdmin() || isMemberOwner(existing().createdByMemberId) || isConsumingActiveInvitation());
-      allow delete: if isSignedIn() && isValidId(invitationId) && (isAdmin() || isMemberOwner(existing().createdByMemberId));
-    }
-
-    match /activityLogs/{logId} {
-      allow get: if isAdmin() && isValidId(logId);
-      allow list: if isAdmin() && request.time != null;
-      allow create: if isSignedIn() && isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == logId;
-      allow update: if isAdmin() && isValidId(logId) && isValidActivityLog(incoming()) && incoming().id == existing().id;
-      allow delete: if isAdmin() && isValidId(logId);
-    }
-  }
-}
-```
+Pełny plik reguł bezpieczeństwa Zero-Trust ABAC znajduje się w `/firestore.rules` (oraz jest zaszyty jako stała `PRODUCTION_FIRESTORE_RULES` w `src/lib/firebase.ts`, skąd Administrator może go skopiować jednym kliknięciem w aplikacji).
 
 ---
 
-## 10. Checklista Konfiguracji Projektu w Konsoli Firebase
+## 12. Checklista Konfiguracji Projektu w Konsoli Firebase i na GitHub.com
 
-Gdy tworzysz nowy projekt w [Firebase Console](https://console.firebase.google.com/) pod kolejną aplikację:
+### Część A — Konsola Firebase (`console.firebase.google.com`):
+1. **Utwórz aplikację Web (`</>`)**: Project settings (⚙️) → General → Your apps → skopiuj blok `firebaseConfig`.
+2. **Włącz dostawców logowania w Authentication**: Build → Authentication → Sign-in method → włącz **Google** (wybierz *Project support email* i kliknij Save) oraz **Anonymous**.
+3. **Dodaj domenę produkcyjną do Authorized Domains**: Build → Authentication → Settings → Authorized domains → dodaj `<twoj-login>.github.io`.
+4. **Utwórz bazę Cloud Firestore i opublikuj reguły**: Build → Firestore Database → Create database → zakładka **Rules** → wklej reguły z `firestore.rules` i kliknij **Publish**.
 
-1. **Utwórz aplikację Web (`</>`)**:
-   - Wejdź w **Project settings (⚙️) → General → Your apps → Add app (`</>`)**.
-   - Skopiuj blok `firebaseConfig` (możesz skopiować surowy kod JavaScript prosto z konsoli — parser w aplikacji sam go rozpozna).
-2. **Włącz dostawców logowania w Authentication**:
-   - Wejdź w **Build → Authentication → Sign-in method**:
-     - Włącz **Google** (wybierz swój *Project support email* i kliknij **Save**).
-     - Włącz **Anonymous** (niezbędne, aby urządzenia domowników otrzymywały własne kryptograficzne `request.auth.uid`).
-3. **Dodaj domenę produkcyjną do Authorized Domains**:
-   - Wejdź w **Build → Authentication → Settings → Authorized domains** i dodaj swoją domenę GitHub Pages (np. `twoj-login.github.io`).
-4. **Utwórz bazę Cloud Firestore i wklej reguły**:
-   - Wejdź w **Build → Firestore Database → Create database**.
-   - W zakładce **Rules** wklej reguły z Rozdziału 9 powyżej i kliknij **Publish**.
-5. **Zaloguj się jako Administrator w aplikacji**:
-   - Po pierwszym logowaniu kontem Google aplikacja automatycznie wywoła `ensureBaseCollectionsInitializedInFirestore` i utworzy wszystkie 6 kolekcji bazowych bez naruszania istniejących danych.
+### Część B — GitHub.com (po pierwszym natywnym commicie z Google AI Studio):
+1. **Zmień widoczność repozytorium z Private (`🔒`) na Public**:
+   `https://github.com/<twoj-login>/<nazwa-repo>/settings#danger-zone-heading` → *Change repository visibility* → *Change to public*.
+2. **Włącz gałąź `gh-pages` w GitHub Pages**:
+   `https://github.com/<twoj-login>/<nazwa-repo>/settings/pages` → w sekcji *Branch* zmień z `None` na **`gh-pages`** (`/ (root)`) i kliknij **Save**.
 
 ---
 
-## 11. 5 Filarów Utwardzenia Pentestowego (Zero-Plaintext Storage, CSP, GCP API Key Restrictions, Sourcemap Off, Zero-State Logout)
+## 13. 8 Filarów Utwardzenia Pentestowego, Stabilności i Ergonomii (Zero-Plaintext Storage, CSP, Tarcza Prywatności, Brute-Force Lockout, k-Anonymity, Rollback)
 
-Poniżej znajduje się zestawienie 5 zabezpieczeń wdrożonych przeciwko atakom po stronie klienta (przeglądarka / pamięć RAM / API):
-
-### Filar 1: Brak Jawnych Kluczy w `localStorage` (AES-256-GCM Wrapped Keys)
-- **Zagrożenie**: Atakujący otwiera Narzędzia Deweloperskie (`F12 -> Application -> Local Storage`) i szuka surowego klucza `dekBase64`.
-- **Zabezpieczenie (`src/lib/crypto.ts`, `src/lib/deviceAndBiometrics.ts`, `src/App.tsx`)**:
-  - Surowy klucz deszyfrujący (`activeDekBase64`) istnieje **wyłącznie w pamięci RAM (`useState`)**.
-  - W `localStorage` (zarówno pod kluczem sesyjnym `fsv_remembered_session_v1`, jak i biometrycznym `fsv_biometric_vault_v1`) zapisywany jest wyłącznie szyfrogram `wrappedKeysPayload: "ENC[AES-256-GCM:iv:ciphertext]"` oraz losowa sól `keyWrapSaltBase64`.
-  - Klucz owijający (KEK) jest wyprowadzany przez `PBKDF2-SHA256` (100 000 iteracji) z fizycznego profilu urządzenia (`deviceFingerprint` + `hardwareSignatureHash` + `credentialIdBase64` / `memberId`).
-
-```typescript
-export async function wrapLocalDeviceKeysPayload(params: {
-  dekBase64: string;
-  mergedDeks: string[];
-  deviceFingerprint: string;
-  hardwareSignatureHash: string;
-  bindingToken: string;
-  saltBase64?: string;
-}): Promise<{ wrappedKeysPayload: string; keyWrapSaltBase64: string }> {
-  const keyWrapSaltBase64 = params.saltBase64 || generateSaltBase64(16);
-  const compositeSecret = [
-    'FSV_LOCAL_WRAPPED_KEY_V1',
-    params.deviceFingerprint.trim(),
-    params.hardwareSignatureHash.trim(),
-    params.bindingToken.trim(),
-  ].join('|');
-  const kek = await deriveAesKeyFromPassword(compositeSecret, keyWrapSaltBase64);
-  const plainJson = JSON.stringify({
-    dekBase64: params.dekBase64,
-    mergedDeks: params.mergedDeks || [],
-  });
-  const wrappedKeysPayload = await encryptWithCryptoKey(plainJson, kek);
-  return { wrappedKeysPayload, keyWrapSaltBase64 };
-}
-```
-
-### Filar 2: Ochrona przed XSS i Polityka Content Security Policy (CSP)
-- **Zagrożenie**: Wstrzyknięcie `<script>alert('HACKED')</script>`, `<img src=x onerror=...>` lub `javascript:alert(1)` w polu nazwy usługi, loginu lub adresu URL.
-- **Zabezpieczenie (`index.html`, `src/lib/crypto.ts`, `src/components/PasswordCard.tsx`)**:
-  1. Całkowity zakaz używania `dangerouslySetInnerHTML` w kodzie React (0 wystąpień).
-  2. Funkcja `sanitizeSafeHttpUrl(rawUrl)` waliduje każdy otwierany link zewnętrzny za pomocą parsera `new URL()` i przepuszcza wyłącznie protokoły `https:` oraz `http:`, blokując `javascript:`, `data:` oraz `vbscript:`.
-  3. W pliku `index.html` wdrożony jest ścisły nagłówek meta `Content-Security-Policy` blokujący obce skrypty inline (`script-src` bez `'unsafe-inline'` i bez `'unsafe-eval'`) oraz `object-src 'none'`:
-
-```html
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://apis.google.com https://*.firebaseapp.com https://*.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com wss://*.firebaseio.com https://api.github.com https://*.github.io; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com; object-src 'none'; base-uri 'self';" />
-```
-
-### Filar 3: Uszczelnienie Klucza `apiKey` w Google Cloud Console (API Key Restrictions)
-- **Zagrożenie**: Atakujący odczytuje publiczny `apiKey` Firebase i próbuje wywołać API z obcej domeny lub własnego skryptu.
-- **Zabezpieczenie w kodzie (`server.ts`)**: Eksporter na GitHub Pages automatycznie czyści plik `firebase-applet-config.json` do pustego obiektu `{}`, więc w publicznym repozytorium GitHub nie ma żadnych kluczy.
-- **Instrukcja Konfiguracji w Google Cloud Console (Krok po Kroku)**:
-  1. Otwórz [Google Cloud Console → APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials) i wybierz swój projekt Firebase (np. `familypwdvault`).
-  2. W sekcji **API Keys** kliknij na klucz **Browser key (auto created by Firebase)**.
-  3. W sekcji **Application restrictions** wybierz **Websites (HTTP referrers)** i dodaj swoje autoryzowane adresy:
-     - `https://<twoj-login>.github.io/*`
-     - `https://<twoj-projekt>.firebaseapp.com/*`
-     - `https://<twoj-projekt>.web.app/*`
-     - *(opcjonalnie do testów lokalnych)* `http://localhost:3000/*`
-  4. W sekcji **API restrictions** wybierz **Restrict key** i zaznacz wyłącznie 4 usługi wymagane przez Firebase Web SDK:
-     - **Identity Toolkit API**
-     - **Token Service API**
-     - **Cloud Firestore API**
-     - **Firebase Installations API**
-  5. Kliknij **Save**. Od tej chwili każde wywołanie Twojego klucza `apiKey` z obcej domeny lub spoza tych 4 usług zostanie natychmiast odrzucone przez serwery Google (HTTP 403).
-
-### Filar 4: Blokada Wycieku Kodu Źródłowego (Wyłączenie Source Maps)
-- **Zagrożenie**: Atakujący otwiera `F12 -> Sources` w wersji produkcyjnej i odczytuje oryginalne pliki `.ts` / `.tsx` z map źródłowych (`.map`).
-- **Zabezpieczenie (`vite.config.ts`, `server.ts`)**:
-  - W `vite.config.ts` ustawiono jawnie:
-    ```typescript
-    build: {
-      sourcemap: false,
-      minify: 'esbuild',
-    }
-    ```
-  - W `server.ts` eksporter gałęzi `main` oraz `gh-pages` bezwzględnie odrzuca wszelkie pliki z rozszerzeniem `.map`.
-
-### Filar 5: Brak Wycieków Stanu po Wylogowaniu (Zero-State RAM & Clipboard Logout)
-- **Zagrożenie**: Po kliknięciu „Wyloguj” atakujący bada stan głównego komponentu przez React Developer Tools w poszukiwaniu tablicy haseł lub odszyfrowanych rekordów poprzedniego użytkownika.
-- **Zabezpieczenie (`src/App.tsx`)**:
-  - Zarówno funkcja `handleLogout`, jak i timer nieaktywności `Auto-Lock` natychmiastowo zerują wszystkie struktury w pamięci RAM (`setDecryptedPrivateMap({})`, `setPasswords([])`, `setActivityLogs([])`, `setActiveDekBase64(null)`, `setActiveMergedDeks([])`), usuwają klucz sesyjny z `localStorage` oraz nadpisują schowek systemowy pustym ciągiem (`navigator.clipboard.writeText('')`).
-
+1. **Filar 1 — Zero Jawnych Kluczy w `localStorage` (`AES-256-GCM Wrapped Keys`)**:
+   Surowy klucz DEK żyje wyłącznie w pamięci RAM (`useState`). W `localStorage` zapisywany jest wyłącznie szyfrogram `ENC[AES-256-GCM:iv:ciphertext]` owinięty kluczem pochodnym z sygnatury sprzętowej urządzenia (`wrapLocalDeviceKeysPayload`).
+2. **Filar 2 — Ochrona Anti-XSS i Polityka Content Security Policy (CSP)**:
+   Zero użyć `dangerouslySetInnerHTML`, walidacja protokołów URL (`sanitizeSafeHttpUrl`) oraz ścisły nagłówek `Content-Security-Policy` w `index.html` (z dozwolonymi wyłącznie domenami Firebase oraz `https://api.pwnedpasswords.com`).
+3. **Filar 3 — Ochrona Kluczy i Gatekeep 2 (`firebase-applet-config.json = {}`)**:
+   Skrypt `scripts/build-gh-pages.mjs` oraz `.github/workflows/deploy.yml` gwarantują, że w publicznym repozytorium i na GitHub Pages plik `firebase-applet-config.json` jest pustym obiektem `{}`.
+4. **Filar 4 — Wyłączenie Source Maps (`sourcemap: false`)**:
+   W `vite.config.ts` ustawiono `build: { sourcemap: false, minify: 'esbuild' }`.
+5. **Filar 5 — Zero-State Logout & Auto-Lock**:
+   Wylogowanie i blokada nieaktywności natychmiastowo zerują wszystkie odszyfrowane rekordy w pamięci RAM i czyszczą schowek systemowy.
+6. **Filar 6 — Tarcza Prywatności w Tle (`visibilitychange`) oraz Ochrona Brute-Force Logowania**:
+   Przełączenie karty lub zminimalizowanie aplikacji na telefonie automatycznie maskuje odsłonięte hasła i zamyka okna modalne bez wylogowywania użytkownika. Z kolei 5 nieudanych prób logowania włącza 60-sekundową blokadę Brute-Force.
+7. **Filar 7 — Zero-Knowledge Test Wycieków (`SHA-1 k-Anonymity` HaveIBeenPwned)**:
+   Funkcja `checkPasswordPwnedKAnonymity` wylicza lokalnie w przeglądarce skrót `SHA-1` hasła i wysyła do API `https://api.pwnedpasswords.com/range/{prefix5}` **wyłącznie pierwsze 5 znaków skrótu**, sprawdzając lokalnie resztę sufiksu (pełne hasło ani pełny hash nigdy nie opuszczają urządzenia).
+8. **Filar 8 — Historia 3 Ostatnich Wersji z 1-Click Rollback, Zegar 2FA TOTP Live i Kierowane SOS**:
+   Każda zmiana hasła zachowuje w `passwordHistory` 3 poprzednie wersje z datą i autorem oraz przyciskiem **„Przywróć to hasło”**. Karty obsługują również wbudowany generator kodów **2FA TOTP (RFC 6238 HMAC-SHA1)** odświeżany co 30 sekund, PIN profilu TV oraz zgłoszenia **SOS / Kod TV Live** kierowane bezpośrednio do właściciela (założyciela) danego wpisu.
