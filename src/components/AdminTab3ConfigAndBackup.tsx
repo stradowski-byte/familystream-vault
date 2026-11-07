@@ -392,9 +392,103 @@ export const AdminTab3ConfigAndBackup: React.FC<
             </div>
           </div>
 
+          {/* GitHub Repository Visibility (Private -> Public) & Live GitHub Pages Links */}
+          <div className="pt-3 border-t border-[var(--vault-border)] space-y-2.5">
+            <div className="font-semibold text-[var(--vault-text)]">
+              Repozytorium GitHub (<code className="font-mono text-[var(--vault-accent)]">stradowski-byte/familystream-vault</code>) i publikacja GitHub Pages:
+            </div>
+
+            <div className="p-3 rounded-lg border border-[var(--vault-warning)] bg-[var(--vault-surface)] space-y-1.5 text-[11px]">
+              <div className="font-bold text-[var(--vault-warning)] flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  Ważne po pierwszym natywnym commicie z AI Studio: Przestaw repozytorium z Private na Public!
+                </span>
+              </div>
+              <p className="text-[var(--vault-muted)] leading-relaxed">
+                Natywna integracja Google AI Studio tworzy repozytorium jako <strong>Private</strong>. Darmowy hosting <strong>GitHub Pages wymaga repozytorium Publicznego (Public)</strong>. Kliknij poniższy przycisk <strong>„1. Zmień z Private na Public (Danger Zone)”</strong>, na dole strony GitHub kliknij <em>Change repository visibility → Change to public</em>. Nasz workflow automatycznie czyści klucze testowe (<code>firebase-applet-config.json = &#123;&#125;</code>), więc repozytorium jest w 100% bezpieczne jako publiczne.
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              <a
+                href="https://github.com/stradowski-byte/familystream-vault/settings#danger-zone-heading"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>1. Zmień z Private na Public (Danger Zone)</span>
+              </a>
+
+              <a
+                href="https://stradowski-byte.github.io/familystream-vault/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold text-[var(--vault-success)] border border-[var(--vault-success)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>2. Otwórz aplikację PWA (GitHub Pages)</span>
+              </a>
+
+              <button
+                type="button"
+                onClick={() =>
+                  handleCopyDomain(
+                    'https://stradowski-byte.github.io/familystream-vault/'
+                  )
+                }
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg cursor-pointer"
+              >
+                {copiedDomain ===
+                'https://stradowski-byte.github.io/familystream-vault/' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-[var(--vault-success)]" />
+                    <span>Skopiowano adres PWA!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                    <span>Kopiuj adres PWA dla rodziny</span>
+                  </>
+                )}
+              </button>
+
+              <a
+                href="https://github.com/stradowski-byte/familystream-vault/actions"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                <span>Status budowania (GitHub Actions)</span>
+              </a>
+
+              <a
+                href="https://github.com/stradowski-byte/familystream-vault/settings/pages"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                <span>Ustawienia GitHub Pages (gh-pages)</span>
+              </a>
+
+              <a
+                href="https://github.com/stradowski-byte/familystream-vault"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Kod repozytorium (main)</span>
+              </a>
+            </div>
+          </div>
+
           <div className="pt-3 border-t border-[var(--vault-border)] space-y-2">
             <div className="font-semibold text-[var(--vault-text)]">
-              Autoryzacja domeny GitHub Pages w Firebase Auth (jednorazowa konfiguracja dla logowania Google na telefonie):
+              Autoryzacja domeny GitHub Pages i bezpośrednie skróty do konsoli Firebase (<code className="font-mono text-[var(--vault-accent)]">{fbInfo.projectId}</code>):
             </div>
             <p className="text-[11px] text-[var(--vault-muted)] leading-relaxed">
               Aby natywne logowanie Google (<code className="font-mono">Firebase Auth</code>) działało w aplikacji PWA zainstalowanej z GitHub Pages, upewnij się, że domena <code className="font-mono text-[var(--vault-text)]">stradowski-byte.github.io</code> jest dopisana w konsoli Firebase w zakładce <strong>Authentication → Settings → Authorized domains</strong>:
@@ -446,7 +540,47 @@ export const AdminTab3ConfigAndBackup: React.FC<
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-accent)] border border-[var(--vault-accent)] rounded-lg hover:bg-[var(--vault-surface)]"
               >
                 <ExternalLink className="w-3.5 h-3.5" />
-                <span>Otwórz Firebase Authorized Domains</span>
+                <span>Authorized Domains (Firebase)</span>
+              </a>
+
+              <a
+                href={`https://console.firebase.google.com/project/${fbInfo.projectId}/authentication/providers`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                <span>Sign-in method (Google & Anonymous)</span>
+              </a>
+
+              <a
+                href={`https://console.firebase.google.com/project/${fbInfo.projectId}/firestore/databases/-default-/data`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                <span>Firestore Data (6 kolekcji)</span>
+              </a>
+
+              <a
+                href={`https://console.firebase.google.com/project/${fbInfo.projectId}/firestore/databases/-default-/rules`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                <span>Firestore Rules (Reguły)</span>
+              </a>
+
+              <a
+                href={`https://console.firebase.google.com/project/${fbInfo.projectId}/settings/general`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] bg-[var(--vault-surface)] hover:bg-[var(--vault-surface-hover)] rounded-lg"
+              >
+                <ExternalLink className="w-3.5 h-3.5 text-[var(--vault-accent)]" />
+                <span>Project Settings (firebaseConfig)</span>
               </a>
             </div>
           </div>

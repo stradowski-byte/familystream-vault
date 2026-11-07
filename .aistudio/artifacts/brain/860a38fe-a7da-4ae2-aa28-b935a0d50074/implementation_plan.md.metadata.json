@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan całkowitego usunięcia z aplikacji własnej obsługi GitHub (zakładki Admina, endpointów backendowych i typów) na rzecz wyłącznego korzystania z natywnej integracji GitHub w Google AI Studio, wraz z bezpiecznym, opcjonalnym ładowaniem pliku konfiguracyjnego Firebase.",
-  "updatedAt":  "2026-11-07T18:41:01.955736734Z",
+  "summary":  "Plan aktualizacji zakładki „Kopie i Konfiguracja” (AdminTab3ConfigAndBackup.tsx) o komplet aktualnych linków do repozytorium stradowski-byte/familystream-vault, przełączenia widoczności z Private na Public (Danger Zone), statusu GitHub Actions, adresu produkcyjnego GitHub Pages oraz bezpośrednich sekcji Firebase Console.",
+  "updatedAt":  "2026-11-07T19:46:55.113306059Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

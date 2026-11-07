@@ -1,32 +1,30 @@
-# Plan Wdrożenia: Całkowite usunięcie własnej integracji GitHub z aplikacji
+# Plan Wdrożenia: Aktualizacja zakładki „Kopie i Konfiguracja” oraz przełączenie repozytorium z Private na Public
 
-## 1. Cel zmian
-Całkowite wyczyszczenie kodu aplikacji (zarówno po stronie interfejsu użytkownika, jak i serwera `server.ts`) z ręcznej obsługi commitów, tokenów PAT oraz publikacji GitHub, tak aby projekt korzystał wyłącznie z **natywnej integracji GitHub wbudowanej w Google AI Studio**, bez dodawania zewnętrznych plików workflow.
+## 1. Dlaczego zmiana repozytorium na Public jest kluczowa?
+Natywna integracja GitHub w Google AI Studio domyślnie tworzy repozytorium `stradowski-byte/familystream-vault` jako **Prywatne (Private)**. Na darmowym koncie GitHub usługa **GitHub Pages działa wyłącznie dla repozytoriów Publicznych (Public)** — dopóki repozytorium jest prywatne, GitHub blokuje publikację strony `https://stradowski-byte.github.io/familystream-vault/`.
+Ponieważ nasz workflow `.github/workflows/deploy.yml` podczas budowania czyści `firebase-applet-config.json` do pustego obiektu `{}`, repozytorium nie zawiera żadnych haseł ani kluczy prywatnych i może być w 100% bezpiecznie ustawione jako **Public**.
 
 ---
 
-## 2. Zakres modyfikacji w architekturze
+## 2. Zakres zmian w aplikacji
 
-### A. Usunięcie zakładki i komponentu GitHub z interfejsu Administratora
-- **Usunięcie pliku `/src/components/AdminTab4GitHubAndUpdates.tsx`**: Całkowite skasowanie komponentu obsługującego formularz tokenu PAT, konfigurację repozytorium i ręczne wysyłanie commitów z poziomu aplikacji.
-- **Aktualizacja `/src/components/TopBar.tsx`**:
-  - Usunięcie identyfikatora `'github'` z typu `AdminTabId` (pozostają wyłącznie: `'vault' | 'profile' | 'approvals' | 'config'`).
-  - Usunięcie przycisku zakładki `GitHub` z paska nawigacji Administratora oraz zbędnego parametru `isAiStudioPreview`.
-- **Aktualizacja `/src/App.tsx`**:
-  - Usunięcie importu i renderowania `AdminTab4GitHubAndUpdates`.
-  - Wyczyszczenie przekazania nieużywanych właściwości do `TopBar`.
-- **Aktualizacja `/src/types/vault.ts`**:
-  - Usunięcie nieużywanych interfejsów `GitHubSyncConfig` oraz `GitHubPushResult`.
+### A. Dodanie panelu „Repozytorium GitHub, Widoczność Public i Adres Produkcyjny PWA” w zakładce `Kopie i Konfiguracja` (`/src/components/AdminTab3ConfigAndBackup.tsx`)
+W sekcji 01 zakładki **Kopie i Konfiguracja** dodamy przejrzystą kartę z kompletem aktualnych linków i przycisków dla repozytorium `stradowski-byte/familystream-vault`:
+1. **Przełączenie repozytorium z Private na Public (Wymagane dla GitHub Pages)**:
+   - Bezpośredni przycisk prowadzący do sekcji **Danger Zone** w ustawieniach repozytorium:
+     `https://github.com/stradowski-byte/familystream-vault/settings#danger-zone-heading`
+   - Zwięzła instrukcja 3 kliknięć: *Change repository visibility* → *Change to public* → potwierdzenie nazwy `stradowski-byte/familystream-vault`.
+2. **Komplet aktualnych linków GitHub (`stradowski-byte/familystream-vault`)**:
+   - **Produkcyjna aplikacja PWA (GitHub Pages)**: `https://stradowski-byte.github.io/familystream-vault/` (przycisk otwarcia w nowej karcie + przycisk kopiowania adresu dla domowników).
+   - **Status budowania po natywnym commicie (GitHub Actions)**: `https://github.com/stradowski-byte/familystream-vault/actions`
+   - **Ustawienia GitHub Pages (`gh-pages`)**: `https://github.com/stradowski-byte/familystream-vault/settings/pages`
+   - **Kod źródłowy repozytorium (`main`)**: `https://github.com/stradowski-byte/familystream-vault`
+3. **Komplet zaktualizowanych, bezpośrednich linków do konsoli Firebase (dla aktywnego projektu)**:
+   - *Project Settings → General (Your apps / firebaseConfig)*
+   - *Authentication → Sign-in method (Google & Anonymous)*
+   - *Authentication → Settings → Authorized domains (`stradowski-byte.github.io`)*
+   - *Firestore Database → Data (6 kolekcji)*
+   - *Firestore Database → Rules (`firestore.rules`)*
 
-### B. Wyczyszczenie serwera `/server.ts` oraz polityki CSP w `/index.html`
-- **Odchudzenie `/server.ts`**:
-  - Usunięcie wszystkich endpointów `/api/github/config`, `/api/github/push`, `/api/github/pages-status` oraz powiązanych funkcji pomocniczych obsługujących GitHub REST API i lokalny plik metadanych `data/github-deploy-meta.json`.
-  - Pozostawienie czystego, lekkiego serwera Express + Vite obsługującego wyłącznie aplikację na porcie `3000` oraz nagłówki bezpieczeństwa.
-- **Aktualizacja `/index.html`**:
-  - Usunięcie domen `https://api.github.com` oraz `https://*.github.io` z dyrektywy `connect-src` w nagłówku `Content-Security-Policy`.
-
-### C. Bezpieczny, opcjonalny import `firebase-applet-config.json` w `/src/lib/firebase.ts`
-- Zastąpienie sztywnego statycznego importu `import bundledConfig from '../../firebase-applet-config.json'` dynamicznym opcjonalnym ładowaniem przez `import.meta.glob('../../firebase-applet-config.json', { eager: true })`.
-- Dzięki temu:
-  - W środowisku Google AI Studio aplikacja nadal automatycznie wykrywa wbudowaną bazę testową.
-  - Po natywnym commicie do repozytorium GitHub (gdzie `firebase-applet-config.json` jest ignorowany przez `.gitignore`) projekt zawsze zbuduje się bez błędów kompilacji i poza środowiskiem AI Studio od razu zażąda wgrania własnej konfiguracji Firebase (Gatekeep 2).
+### B. Ulepszenie raportowania w `.github/workflows/deploy.yml`
+- Dodanie w ostatnim kroku workflow automatycznego podsumowania (`$GITHUB_STEP_SUMMARY`), które w przypadku wykrycia prywatnego repozytorium wyświetli w zakładce GitHub Actions bezpośredni link do `Settings -> Danger Zone`, a po przełączeniu na Public potwierdzi aktywny adres `https://stradowski-byte.github.io/familystream-vault/`.

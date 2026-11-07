@@ -1,0 +1,77 @@
+name: Deploy FamilyStream Vault to GitHub Pages (gh-pages)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages-deploy'
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Prepare clean production firebase-applet-config.json (Gatekeep 2)
+        run: |
+          echo "{}" > firebase-applet-config.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build Production PWA Bundle (dist/)
+        run: npm run build
+
+      - name: Prepare GitHub Pages SPA fallback (404.html & .nojekyll)
+        run: |
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
+
+      - name: Publish dist/ to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./dist
+          publish_branch: gh-pages
+          force_orphan: true
+          commit_message: 'chore(gh-pages): deploy FamilyStream Vault PWA'
+
+      - name: Ensure GitHub Pages is enabled on gh-pages branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "### FamilyStream Vault — GitHub Pages Deployment" >> $GITHUB_STEP_SUMMARY
+          if gh api \
+            --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/pages" \
+            -f "source[branch]=gh-pages" \
+            -f "source[path]=/" 2>/dev/null || \
+            gh api \
+            --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/pages" \
+            -f "source[branch]=gh-pages" \
+            -f "source[path]=/" 2>/dev/null; then
+            echo "- Status: **Aktywne na gałęzi \`gh-pages\`**" >> $GITHUB_STEP_SUMMARY
+            echo "- Adres PWA: https://stradowski-byte.github.io/familystream-vault/" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Gałąź \`gh-pages\` została zbudowana i opublikowana." >> $GITHUB_STEP_SUMMARY
+            echo "- **Uwaga:** Jeśli repozytorium jest nadal ustawione jako **Private**, przełącz je na **Public** tutaj: https://github.com/${{ github.repository }}/settings#danger-zone-heading a następnie sprawdź https://github.com/${{ github.repository }}/settings/pages" >> $GITHUB_STEP_SUMMARY
+          fi
