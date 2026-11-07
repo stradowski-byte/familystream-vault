@@ -363,3 +363,92 @@ export function generateStrongPassword(length = 16): string {
   }
   return result;
 }
+
+/**
+ * Wraps `dekBase64` and `mergedDeks` into an AES-256-GCM ciphertext (`ENC[AES-256-GCM:iv:cipher]`)
+ * before storing in localStorage (`fsv_remembered_session_v1` or `fsv_biometric_vault_v1`).
+ * Ensures raw DEK keys never appear in plain text in browser DevTools (F12 -> Storage).
+ */
+export async function wrapLocalDeviceKeysPayload(params: {
+  dekBase64: string;
+  mergedDeks: string[];
+  deviceFingerprint: string;
+  hardwareSignatureHash: string;
+  bindingToken: string;
+  saltBase64?: string;
+}): Promise<{ wrappedKeysPayload: string; keyWrapSaltBase64: string }> {
+  const keyWrapSaltBase64 = params.saltBase64 || generateSaltBase64(16);
+  const compositeSecret = [
+    'FSV_LOCAL_WRAPPED_KEY_V1',
+    params.deviceFingerprint.trim(),
+    params.hardwareSignatureHash.trim(),
+    params.bindingToken.trim(),
+  ].join('|');
+  const kek = await deriveAesKeyFromPassword(
+    compositeSecret,
+    keyWrapSaltBase64
+  );
+  const plainJson = JSON.stringify({
+    dekBase64: params.dekBase64,
+    mergedDeks: params.mergedDeks || [],
+  });
+  const wrappedKeysPayload = await encryptWithCryptoKey(plainJson, kek);
+  return { wrappedKeysPayload, keyWrapSaltBase64 };
+}
+
+export async function unwrapLocalDeviceKeysPayload(params: {
+  wrappedKeysPayload: string;
+  keyWrapSaltBase64: string;
+  deviceFingerprint: string;
+  hardwareSignatureHash: string;
+  bindingToken: string;
+}): Promise<{ dekBase64: string; mergedDeks: string[] }> {
+  const compositeSecret = [
+    'FSV_LOCAL_WRAPPED_KEY_V1',
+    params.deviceFingerprint.trim(),
+    params.hardwareSignatureHash.trim(),
+    params.bindingToken.trim(),
+  ].join('|');
+  const kek = await deriveAesKeyFromPassword(
+    compositeSecret,
+    params.keyWrapSaltBase64
+  );
+  const decryptedJson = await decryptWithCryptoKey(
+    params.wrappedKeysPayload,
+    kek
+  );
+  const parsed = JSON.parse(decryptedJson) as {
+    dekBase64?: string;
+    mergedDeks?: string[];
+  };
+  if (!parsed?.dekBase64) {
+    throw new Error('Nieprawidłowy ładunek klucza wtórnego (Wrapped Key).');
+  }
+  return {
+    dekBase64: parsed.dekBase64,
+    mergedDeks: Array.isArray(parsed.mergedDeks) ? parsed.mergedDeks : [],
+  };
+}
+
+/**
+ * Strictly validates that a service URL uses only `https:` or `http:` protocol,
+ * blocking `javascript:`, `data:`, `vbscript:` or other XSS URI vectors.
+ */
+export function sanitizeSafeHttpUrl(rawUrl?: string | null): string | null {
+  if (!rawUrl) return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return null;
+  const candidate = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(trimmed)
+    ? trimmed
+    : `https://${trimmed}`;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+

@@ -1215,10 +1215,18 @@ export async function ensureBaseCollectionsInitializedInFirestore(params: {
       initializedCollections.push('devices');
     }
 
-    // 4. Collection: passwords (check with Admin or allowedMemberIds query)
-    const passwordsSnap = await getDocs(
-      query(collection(db, 'passwords'), limit(1))
-    );
+    // 4. Collection: passwords (always respect firestore.rules: Admin or where('allowedMemberIds', 'array-contains', uid))
+    const isVerifiedVaultAdmin =
+      !cfgSnap.exists() ||
+      (cfgSnap.data() as VaultConfig)?.adminUid === effectiveAdminUid;
+    const passwordsCheckQuery = isVerifiedVaultAdmin
+      ? query(collection(db, 'passwords'), limit(1))
+      : query(
+          collection(db, 'passwords'),
+          where('allowedMemberIds', 'array-contains', effectiveAdminUid),
+          limit(1)
+        );
+    const passwordsSnap = await getDocs(passwordsCheckQuery);
     if (!passwordsSnap.empty) {
       skippedExistingCollections.push('passwords');
     } else {

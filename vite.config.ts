@@ -62,6 +62,10 @@ export default defineConfig(() => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    build: {
+      sourcemap: false,
+      minify: 'esbuild' as const,
+    },
     server: {
       hmr: false,
       watch: null,

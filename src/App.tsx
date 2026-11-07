@@ -72,9 +72,11 @@ import {
   unwrapDekFromMergeEscrow,
   unwrapDekWithHardwareCertificate,
   unwrapDekWithPassword,
+  unwrapLocalDeviceKeysPayload,
   wrapDekForMergeEscrow,
   wrapDekWithHardwareCertificate,
   wrapDekWithPassword,
+  wrapLocalDeviceKeysPayload,
 } from './lib/crypto';
 import {
   authenticateWithBiometrics,
@@ -82,6 +84,7 @@ import {
   getStoredBiometricProfile,
   registerBiometricUnlock,
   StoredBiometricProfile,
+  verifyDeviceHardwareSignatureMatch,
 } from './lib/deviceAndBiometrics';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { usePWAInstall } from './hooks/usePWAInstall';
@@ -111,8 +114,11 @@ function readStoredDeviceTheme(): ThemeMode | null {
 
 interface RememberedVaultSession {
   memberId: string;
-  dekBase64: string;
-  mergedDeks: string[];
+  wrappedKeysPayload?: string;
+  keyWrapSaltBase64?: string;
+  // Legacy fallback fields (automatically migrated and stripped from localStorage)
+  dekBase64?: string;
+  mergedDeks?: string[];
   savedAt: string;
 }
 
@@ -308,7 +314,7 @@ export default function App() {
 
     const tryRestoreSession = async () => {
       try {
-        // A. Check remembered session in localStorage (works for both Admin and Family Members across reloads/HMR)
+        // A. Check remembered session in localStorage (encrypted with AES-256-GCM Wrapped Key bound to device hardware)
         try {
           const rawSession = localStorage.getItem(REMEMBERED_SESSION_KEY);
           if (rawSession) {
@@ -317,21 +323,42 @@ export default function App() {
             ) as RememberedVaultSession;
             if (
               parsedSession?.memberId &&
-              parsedSession?.dekBase64 &&
               members.some(
                 (m) => m.id === parsedSession.memberId && m.status === 'active'
               )
             ) {
-              if (!cancelled) {
-                setCurrentMemberId(parsedSession.memberId);
-                setActiveDekBase64(parsedSession.dekBase64);
-                setActiveMergedDeks(parsedSession.mergedDeks || []);
+              if (
+                parsedSession.wrappedKeysPayload &&
+                parsedSession.keyWrapSaltBase64
+              ) {
+                const unwrapped = await unwrapLocalDeviceKeysPayload({
+                  wrappedKeysPayload: parsedSession.wrappedKeysPayload,
+                  keyWrapSaltBase64: parsedSession.keyWrapSaltBase64,
+                  deviceFingerprint: detectedDevice.deviceFingerprint,
+                  hardwareSignatureHash: detectedDevice.hardwareSignatureHash,
+                  bindingToken: parsedSession.memberId,
+                });
+                if (!cancelled) {
+                  setCurrentMemberId(parsedSession.memberId);
+                  setActiveDekBase64(unwrapped.dekBase64);
+                  setActiveMergedDeks(unwrapped.mergedDeks);
+                }
+                return;
+              } else if (parsedSession.dekBase64) {
+                // Seamless migration of legacy plaintext session -> encrypt immediately
+                const legacyDek = parsedSession.dekBase64;
+                const legacyMerged = parsedSession.mergedDeks || [];
+                if (!cancelled) {
+                  setCurrentMemberId(parsedSession.memberId);
+                  setActiveDekBase64(legacyDek);
+                  setActiveMergedDeks(legacyMerged);
+                }
+                return;
               }
-              return;
             }
           }
         } catch {
-          // ignore storage errors
+          // ignore storage or decryption errors
         }
 
         // B. Check active Firebase Auth user from onAuthStateChanged (browserLocalPersistence)
@@ -589,29 +616,47 @@ export default function App() {
     };
   }, [passwords, currentMember, activeDekBase64, activeMergedDeks]);
 
-  // Persist active unlocked session so reopening the PWA keeps the session remembered
+  // Persist active unlocked session using AES-256-GCM Wrapped Key so raw DEK never appears in localStorage
   useEffect(() => {
-    if (currentMemberId && activeDekBase64 && !isVaultLockedByTimeout) {
-      try {
-        const payload: RememberedVaultSession = {
-          memberId: currentMemberId,
-          dekBase64: activeDekBase64,
-          mergedDeks: activeMergedDeks,
-          savedAt: new Date().toISOString(),
-        };
-        localStorage.setItem(REMEMBERED_SESSION_KEY, JSON.stringify(payload));
-      } catch {
-        // ignore
+    let cancelled = false;
+    async function persistEncryptedSession() {
+      if (currentMemberId && activeDekBase64 && !isVaultLockedByTimeout) {
+        try {
+          const { wrappedKeysPayload, keyWrapSaltBase64 } =
+            await wrapLocalDeviceKeysPayload({
+              dekBase64: activeDekBase64,
+              mergedDeks: activeMergedDeks,
+              deviceFingerprint: detectedDevice.deviceFingerprint,
+              hardwareSignatureHash: detectedDevice.hardwareSignatureHash,
+              bindingToken: currentMemberId,
+            });
+          if (cancelled) return;
+          const payload: RememberedVaultSession = {
+            memberId: currentMemberId,
+            wrappedKeysPayload,
+            keyWrapSaltBase64,
+            savedAt: new Date().toISOString(),
+          };
+          localStorage.setItem(REMEMBERED_SESSION_KEY, JSON.stringify(payload));
+        } catch {
+          // ignore storage errors
+        }
       }
     }
+    void persistEncryptedSession();
+    return () => {
+      cancelled = true;
+    };
   }, [
     currentMemberId,
     activeDekBase64,
     activeMergedDeks,
     isVaultLockedByTimeout,
+    detectedDevice.deviceFingerprint,
+    detectedDevice.hardwareSignatureHash,
   ]);
 
-  // Auto-Lock inactivity timer
+  // Auto-Lock inactivity timer (clears RAM keys, decrypted map, and clipboard)
   useEffect(() => {
     if (!currentMember || isVaultLockedByTimeout) return;
     const timeoutMinutes = vaultConfig?.autoLockMinutes || 15;
@@ -625,7 +670,15 @@ export default function App() {
         } catch {
           // ignore
         }
+        if (clipboardIntervalRef.current) {
+          window.clearInterval(clipboardIntervalRef.current);
+          clipboardIntervalRef.current = null;
+        }
+        setClipboardCountdown(null);
+        navigator.clipboard?.writeText('').catch(() => {});
         setActiveDekBase64(null);
+        setActiveMergedDeks([]);
+        setDecryptedPrivateMap({});
         setIsVaultLockedByTimeout(true);
       }, timeoutMinutes * 60 * 1000);
     };
@@ -1629,9 +1682,9 @@ export default function App() {
         d.deviceFingerprint === detectedDevice.deviceFingerprint &&
         d.status === 'approved'
     );
-    if (!dev) {
+    if (!dev || !verifyDeviceHardwareSignatureMatch(dev, detectedDevice)) {
       throw new Error(
-        'To urządzenie nie ma aktywnej autoryzacji Administratora.'
+        'To urządzenie nie ma aktywnej autoryzacji Administratora lub sygnatura sprzętowa (hardwareSignatureHash) uległa zmianie.'
       );
     }
 
@@ -2605,16 +2658,33 @@ export default function App() {
     } catch {
       // ignore
     }
+    if (clipboardIntervalRef.current) {
+      window.clearInterval(clipboardIntervalRef.current);
+      clipboardIntervalRef.current = null;
+    }
+    setClipboardCountdown(null);
+    navigator.clipboard?.writeText('').catch(() => {});
+
+    // Zero-State RAM cleanup: immediately purge all decrypted maps, password lists, logs, and keys from React state
+    setDecryptedPrivateMap({});
+    setPasswords([]);
+    setActivityLogs([]);
+    setSearchQuery('');
+    setSelectedCategoryFilter('all');
+    setVaultSectionFilter('all');
+    setCurrentMemberId(null);
+    setActiveDekBase64(null);
+    setActiveMergedDeks([]);
+    setPendingAuthState(null);
+    setIsVaultLockedByTimeout(false);
+    setActiveAdminTab('vault');
+
     // Sign out of Firebase Auth if logged in as a non-anonymous user; preserve anonymous device UID for family member hardware certificate binding
     if (auth && auth.currentUser && !auth.currentUser.isAnonymous) {
       await signOut(auth).catch(() => {});
       void ensureFirebaseAuthSession(false);
     }
-    setCurrentMemberId(null);
-    setActiveDekBase64(null);
-    setActiveMergedDeks([]);
-    setPendingAuthState(null);
-    setActiveAdminTab('vault');
+    setFirebaseConfigVersion((v) => v + 1);
   };
 
   return (

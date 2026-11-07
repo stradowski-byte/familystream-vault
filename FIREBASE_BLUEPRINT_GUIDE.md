@@ -22,6 +22,7 @@ Ten dokument stanowi **kompletną, samowystarczalną specyfikację architektonic
 8. [Kompletny Kod Wzorcowy: Obsługa Linków Zaproszeniowych i PWA Handoff](#8-kompletny-kod-wzorcowy-obsługa-linków-zaproszeniowych-i-pwa-handoff)
 9. [Kompletne Reguły Bezpieczeństwa: `firestore.rules`](#9-kompletne-reguły-bezpieczeństwa-firestorerules)
 10. [Checklista Konfiguracji Projektu w Konsoli Firebase](#10-checklista-konfiguracji-projektu-w-konsoli-firebase)
+11. [5 Filarów Utwardzenia Pentestowego (Zero-Plaintext Storage, CSP, GCP API Key Restrictions, Sourcemap Off, Zero-State Logout)](#11-5-filarów-utwardzenia-pentestowego-zero-plaintext-storage-csp-gcp-api-key-restrictions-sourcemap-off-zero-state-logout)
 
 ---
 
@@ -51,6 +52,13 @@ Wymagania architektoniczne (obowiązkowe do wdrożenia 1:1 wg wzorca):
    - Podczas tworzenia nowego wspólnego wpisu domyślnie zaznaczony jest wyłącznie twórca wpisu („Tylko ja”), a wybór dodatkowych domowników odbywa się z rozwijanej listy multi-select.
    - Po pierwszym logowaniu Administratora funkcja `ensureBaseCollectionsInitializedInFirestore` idempotentnie i nieinwazyjnie inicjalizuje brakujące kolekcje bazowe (`vaultConfig`, `members`, `devices`, główna kolekcja rekordów, `invitations`, `activityLogs`).
    - Na każdym ekranie w prawym górnym rogu znajduje się kompaktowy przycisk przełączania motywu Jasny/Ciemny zapisywany trwale na urządzeniu w `localStorage`.
+5. Pięć Filarów Utwardzenia Pentestowego i Optymalizacji React (Obowiązkowe):
+   - Zero jawnych kluczy w Storage: klucze DEK zapisywane w `localStorage` (sesja i biometria) muszą być owinięte kryptograficznie (`ENC[AES-256-GCM:iv:cipher]`) przez `wrapLocalDeviceKeysPayload` powiązane ze sprzętową sygnaturą urządzenia. Surowy klucz żyje wyłącznie w RAM (`useState`).
+   - Aktywna weryfikacja `hardwareSignatureHash`: funkcja `verifyDeviceHardwareSignatureMatch` weryfikuje zgodność odcisku przeglądarki/urządzenia (`HW-XXXX-XXXX-XXXX`) z zatwierdzonym dokumentem w kolekcji `devices`.
+   - Anti-XSS i CSP: zero użyć `dangerouslySetInnerHTML`, walidacja protokołów URL (`sanitizeSafeHttpUrl` dopuszczający wyłącznie `https:` i `http:`) oraz meta-tag `Content-Security-Policy` w `index.html`.
+   - Blokada Source Maps: jawne `build: { sourcemap: false, minify: 'esbuild' }` w `vite.config.ts` oraz wykluczenie plików `.map` podczas publikacji na GitHub.
+   - Zero-State Logout: wylogowanie i Auto-Lock natychmiastowo zerują tablice danych i mapy odszyfrowanych rekordów w stanie Reacta oraz czyści schowek systemowy.
+   - Optymalizacja React: każde wywołanie `onAuthStateChanged` i `onSnapshot` musi znajdować się w `useEffect` z funkcją czyszczącą (`return () => unsubscribe()`), a karty rekordów na listach muszą być opakowane w `React.memo` i posiadać unikalny atrybut `key={record.id}`.
 ```
 
 ---
@@ -1125,3 +1133,89 @@ Gdy tworzysz nowy projekt w [Firebase Console](https://console.firebase.google.c
    - W zakładce **Rules** wklej reguły z Rozdziału 9 powyżej i kliknij **Publish**.
 5. **Zaloguj się jako Administrator w aplikacji**:
    - Po pierwszym logowaniu kontem Google aplikacja automatycznie wywoła `ensureBaseCollectionsInitializedInFirestore` i utworzy wszystkie 6 kolekcji bazowych bez naruszania istniejących danych.
+
+---
+
+## 11. 5 Filarów Utwardzenia Pentestowego (Zero-Plaintext Storage, CSP, GCP API Key Restrictions, Sourcemap Off, Zero-State Logout)
+
+Poniżej znajduje się zestawienie 5 zabezpieczeń wdrożonych przeciwko atakom po stronie klienta (przeglądarka / pamięć RAM / API):
+
+### Filar 1: Brak Jawnych Kluczy w `localStorage` (AES-256-GCM Wrapped Keys)
+- **Zagrożenie**: Atakujący otwiera Narzędzia Deweloperskie (`F12 -> Application -> Local Storage`) i szuka surowego klucza `dekBase64`.
+- **Zabezpieczenie (`src/lib/crypto.ts`, `src/lib/deviceAndBiometrics.ts`, `src/App.tsx`)**:
+  - Surowy klucz deszyfrujący (`activeDekBase64`) istnieje **wyłącznie w pamięci RAM (`useState`)**.
+  - W `localStorage` (zarówno pod kluczem sesyjnym `fsv_remembered_session_v1`, jak i biometrycznym `fsv_biometric_vault_v1`) zapisywany jest wyłącznie szyfrogram `wrappedKeysPayload: "ENC[AES-256-GCM:iv:ciphertext]"` oraz losowa sól `keyWrapSaltBase64`.
+  - Klucz owijający (KEK) jest wyprowadzany przez `PBKDF2-SHA256` (100 000 iteracji) z fizycznego profilu urządzenia (`deviceFingerprint` + `hardwareSignatureHash` + `credentialIdBase64` / `memberId`).
+
+```typescript
+export async function wrapLocalDeviceKeysPayload(params: {
+  dekBase64: string;
+  mergedDeks: string[];
+  deviceFingerprint: string;
+  hardwareSignatureHash: string;
+  bindingToken: string;
+  saltBase64?: string;
+}): Promise<{ wrappedKeysPayload: string; keyWrapSaltBase64: string }> {
+  const keyWrapSaltBase64 = params.saltBase64 || generateSaltBase64(16);
+  const compositeSecret = [
+    'FSV_LOCAL_WRAPPED_KEY_V1',
+    params.deviceFingerprint.trim(),
+    params.hardwareSignatureHash.trim(),
+    params.bindingToken.trim(),
+  ].join('|');
+  const kek = await deriveAesKeyFromPassword(compositeSecret, keyWrapSaltBase64);
+  const plainJson = JSON.stringify({
+    dekBase64: params.dekBase64,
+    mergedDeks: params.mergedDeks || [],
+  });
+  const wrappedKeysPayload = await encryptWithCryptoKey(plainJson, kek);
+  return { wrappedKeysPayload, keyWrapSaltBase64 };
+}
+```
+
+### Filar 2: Ochrona przed XSS i Polityka Content Security Policy (CSP)
+- **Zagrożenie**: Wstrzyknięcie `<script>alert('HACKED')</script>`, `<img src=x onerror=...>` lub `javascript:alert(1)` w polu nazwy usługi, loginu lub adresu URL.
+- **Zabezpieczenie (`index.html`, `src/lib/crypto.ts`, `src/components/PasswordCard.tsx`)**:
+  1. Całkowity zakaz używania `dangerouslySetInnerHTML` w kodzie React (0 wystąpień).
+  2. Funkcja `sanitizeSafeHttpUrl(rawUrl)` waliduje każdy otwierany link zewnętrzny za pomocą parsera `new URL()` i przepuszcza wyłącznie protokoły `https:` oraz `http:`, blokując `javascript:`, `data:` oraz `vbscript:`.
+  3. W pliku `index.html` wdrożony jest ścisły nagłówek meta `Content-Security-Policy` blokujący obce skrypty inline (`script-src` bez `'unsafe-inline'` i bez `'unsafe-eval'`) oraz `object-src 'none'`:
+
+```html
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://apis.google.com https://*.firebaseapp.com https://*.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob: https:; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com wss://*.firebaseio.com https://api.github.com https://*.github.io; frame-src 'self' https://*.firebaseapp.com https://accounts.google.com; object-src 'none'; base-uri 'self';" />
+```
+
+### Filar 3: Uszczelnienie Klucza `apiKey` w Google Cloud Console (API Key Restrictions)
+- **Zagrożenie**: Atakujący odczytuje publiczny `apiKey` Firebase i próbuje wywołać API z obcej domeny lub własnego skryptu.
+- **Zabezpieczenie w kodzie (`server.ts`)**: Eksporter na GitHub Pages automatycznie czyści plik `firebase-applet-config.json` do pustego obiektu `{}`, więc w publicznym repozytorium GitHub nie ma żadnych kluczy.
+- **Instrukcja Konfiguracji w Google Cloud Console (Krok po Kroku)**:
+  1. Otwórz [Google Cloud Console → APIs & Services → Credentials](https://console.cloud.google.com/apis/credentials) i wybierz swój projekt Firebase (np. `familypwdvault`).
+  2. W sekcji **API Keys** kliknij na klucz **Browser key (auto created by Firebase)**.
+  3. W sekcji **Application restrictions** wybierz **Websites (HTTP referrers)** i dodaj swoje autoryzowane adresy:
+     - `https://<twoj-login>.github.io/*`
+     - `https://<twoj-projekt>.firebaseapp.com/*`
+     - `https://<twoj-projekt>.web.app/*`
+     - *(opcjonalnie do testów lokalnych)* `http://localhost:3000/*`
+  4. W sekcji **API restrictions** wybierz **Restrict key** i zaznacz wyłącznie 4 usługi wymagane przez Firebase Web SDK:
+     - **Identity Toolkit API**
+     - **Token Service API**
+     - **Cloud Firestore API**
+     - **Firebase Installations API**
+  5. Kliknij **Save**. Od tej chwili każde wywołanie Twojego klucza `apiKey` z obcej domeny lub spoza tych 4 usług zostanie natychmiast odrzucone przez serwery Google (HTTP 403).
+
+### Filar 4: Blokada Wycieku Kodu Źródłowego (Wyłączenie Source Maps)
+- **Zagrożenie**: Atakujący otwiera `F12 -> Sources` w wersji produkcyjnej i odczytuje oryginalne pliki `.ts` / `.tsx` z map źródłowych (`.map`).
+- **Zabezpieczenie (`vite.config.ts`, `server.ts`)**:
+  - W `vite.config.ts` ustawiono jawnie:
+    ```typescript
+    build: {
+      sourcemap: false,
+      minify: 'esbuild',
+    }
+    ```
+  - W `server.ts` eksporter gałęzi `main` oraz `gh-pages` bezwzględnie odrzuca wszelkie pliki z rozszerzeniem `.map`.
+
+### Filar 5: Brak Wycieków Stanu po Wylogowaniu (Zero-State RAM & Clipboard Logout)
+- **Zagrożenie**: Po kliknięciu „Wyloguj” atakujący bada stan głównego komponentu przez React Developer Tools w poszukiwaniu tablicy haseł lub odszyfrowanych rekordów poprzedniego użytkownika.
+- **Zabezpieczenie (`src/App.tsx`)**:
+  - Zarówno funkcja `handleLogout`, jak i timer nieaktywności `Auto-Lock` natychmiastowo zerują wszystkie struktury w pamięci RAM (`setDecryptedPrivateMap({})`, `setPasswords([])`, `setActivityLogs([])`, `setActiveDekBase64(null)`, `setActiveMergedDeks([])`), usuwają klucz sesyjny z `localStorage` oraz nadpisują schowek systemowy pustym ciągiem (`navigator.clipboard.writeText('')`).
+

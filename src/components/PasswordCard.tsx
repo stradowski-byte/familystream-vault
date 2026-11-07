@@ -26,7 +26,10 @@ import {
   SubAccountEntry,
   VaultCategory,
 } from '../types/vault';
-import { generateStrongPassword } from '../lib/crypto';
+import {
+  generateStrongPassword,
+  sanitizeSafeHttpUrl,
+} from '../lib/crypto';
 import { prepareOneClickLaunch } from '../lib/deviceAndBiometrics';
 
 interface PasswordCardProps {
@@ -53,7 +56,7 @@ interface PasswordCardProps {
   onStartClipboardCountdown: (seconds: number, label: string) => void;
 }
 
-export const PasswordCard: React.FC<PasswordCardProps> = ({
+const PasswordCardComponent: React.FC<PasswordCardProps> = ({
   record,
   decryptedPrivate,
   categories,
@@ -193,12 +196,10 @@ export const PasswordCard: React.FC<PasswordCardProps> = ({
     onStartClipboardCountdown(clipboardClearSeconds, displayServiceName);
     setTimeout(() => setCopiedField(null), 2500);
 
-    if (displayServiceUrl) {
-      const targetUrl = displayServiceUrl.startsWith('http')
-        ? displayServiceUrl
-        : `https://${displayServiceUrl}`;
+    const safeTargetUrl = sanitizeSafeHttpUrl(displayServiceUrl);
+    if (safeTargetUrl) {
       const anchor = document.createElement('a');
-      anchor.href = targetUrl;
+      anchor.href = safeTargetUrl;
       anchor.target = '_blank';
       anchor.rel = 'noopener noreferrer';
       document.body.appendChild(anchor);
@@ -1298,3 +1299,6 @@ export const PasswordCard: React.FC<PasswordCardProps> = ({
     </div>
   );
 };
+
+export const PasswordCard = React.memo(PasswordCardComponent);
+

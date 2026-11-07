@@ -32,6 +32,11 @@ Bezpieczna, bezserwerowa aplikacja progresywna (PWA) do zarządzania wspólnymi 
    - Autoryzacja nowych urządzeń przez Administratora z wydaniem kryptograficznego certyfikatu sprzętowego (`CERT-HW-...`) oraz odblokowywanie skarbca odciskiem palca / FaceID.
 6. **Trwały Motyw Jasny / Ciemny na Urządzeniu**:
    - Kompaktowy przełącznik motywu (Słońce / Księżyc) dostępny w prawym górnym rogu na każdym ekranie (łącznie z ekranem logowania i konfiguracji), trwale zapamiętywany w `localStorage` urządzenia.
+7. **Utwardzenie Pentestowe (5 Filarów Bezpieczeństwa Client-Side)**:
+   - **Zero-Plaintext Storage (`AES-256-GCM Wrapped Keys`)**: Klucze DEK w `localStorage` (sesja i biometria) są zawsze zaszyfrowane kluczem pochodnym z sygnatury sprzętowej urządzenia (`ENC[AES-256-GCM:...]`). Surowy klucz żyje wyłącznie w pamięci RAM.
+   - **Ochrona Anti-XSS i Polityka CSP**: Brak `dangerouslySetInnerHTML`, walidacja protokołów URL (`sanitizeSafeHttpUrl`) oraz ścisły nagłówek `Content-Security-Policy` w `index.html`.
+   - **Blokada Source Maps (`sourcemap: false`)**: Kod produkcyjny jest zminifikowany bez plików `.map`.
+   - **Zero-State Logout & Auto-Lock**: Wylogowanie oraz blokada nieaktywności natychmiastowo zerują odszyfrowane mapy i listy haseł w stanie Reacta oraz czyszczą schowek systemowy.
 
 ---
 

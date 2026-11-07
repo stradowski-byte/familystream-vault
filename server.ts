@@ -124,12 +124,17 @@ function collectProjectSourceFiles(rootDir: string): Array<{
     'github-deploy-meta.json',
     'package-lock.json',
     'AdminTab4GitHubAndUpdates.tsx',
+    'familystream-vault-latest.zip',
   ]);
 
   function walk(currentDir: string) {
     const entries = fs.readdirSync(currentDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name.startsWith('.DS_Store') || entry.name.endsWith('.tmp')) {
+      if (
+        entry.name.startsWith('.DS_Store') ||
+        entry.name.endsWith('.tmp') ||
+        entry.name.endsWith('.map')
+      ) {
         continue;
       }
       const fullPath = path.join(currentDir, entry.name);
@@ -182,7 +187,11 @@ function collectBuiltDistFiles(distDir: string): Array<{
   function walkDist(currentDir: string) {
     const entries = fs.readdirSync(currentDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (entry.name.startsWith('.DS_Store') || entry.name.endsWith('.tmp')) {
+      if (
+        entry.name.startsWith('.DS_Store') ||
+        entry.name.endsWith('.tmp') ||
+        entry.name.endsWith('.map')
+      ) {
         continue;
       }
       const fullPath = path.join(currentDir, entry.name);
@@ -195,6 +204,7 @@ function collectBuiltDistFiles(distDir: string): Array<{
         if (entry.name === 'aistudio' || entry.name === '.aistudio') continue;
         walkDist(fullPath);
       } else if (entry.isFile()) {
+        if (entry.name === 'familystream-vault-latest.zip') continue;
         results.push({
           relativePath: relPath,
           buffer: fs.readFileSync(fullPath),
@@ -264,6 +274,21 @@ async function startServer() {
   const PORT = 3000;
 
   app.use(express.json({ limit: '15mb' }));
+
+  // Direct ZIP download endpoint for mobile & desktop
+  app.get(['/familystream-vault-latest.zip', '/api/download-zip'], (_req, res) => {
+    const zipPath = path.join(__dirname, 'public', 'familystream-vault-latest.zip');
+    if (!fs.existsSync(zipPath)) {
+      res.status(404).send('Plik ZIP nie został jeszcze wygenerowany.');
+      return;
+    }
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="familystream-vault-latest.zip"'
+    );
+    res.sendFile(zipPath);
+  });
 
   // 1. GET & PUT GitHub CLI Config (Admin Tab 04 — GitHub CLI in AI Studio)
   app.get('/api/github/config', async (_req, res) => {

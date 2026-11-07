@@ -1,4 +1,8 @@
 import { ClientLaunchMode, HardwareDeviceType } from '../types/vault';
+import {
+  unwrapLocalDeviceKeysPayload,
+  wrapLocalDeviceKeysPayload,
+} from './crypto';
 
 const DEVICE_FP_STORAGE_KEY = 'fsv_device_fingerprint_v1';
 const BIOMETRIC_VAULT_STORAGE_KEY = 'fsv_biometric_vault_v1';
@@ -13,6 +17,19 @@ export interface DetectedDeviceProfile {
 }
 
 export interface StoredBiometricProfile {
+  memberId: string;
+  username: string;
+  fullName: string;
+  credentialIdBase64: string;
+  wrappedKeysPayload?: string;
+  keyWrapSaltBase64?: string;
+  // Legacy fallback fields (automatically migrated and stripped from localStorage)
+  dekBase64?: string;
+  mergedDeksBase64?: string[];
+  registeredAt: string;
+}
+
+export interface UnlockedBiometricKeys {
   memberId: string;
   username: string;
   fullName: string;
@@ -211,6 +228,40 @@ export function getDetectedDeviceProfile(): DetectedDeviceProfile {
   };
 }
 
+/**
+ * Verifies that a stored/approved device document matches the current browser/PWA
+ * physical fingerprint and canonical `hardwareSignatureHash`.
+ */
+export function verifyDeviceHardwareSignatureMatch(
+  deviceRecord: {
+    deviceFingerprint: string;
+    hardwareSignatureHash?: string;
+    hardwareModelOs?: string;
+    hardwareDeviceType?: HardwareDeviceType;
+    clientMode?: ClientLaunchMode;
+  },
+  detected: DetectedDeviceProfile
+): boolean {
+  if (deviceRecord.deviceFingerprint !== detected.deviceFingerprint) {
+    return false;
+  }
+  if (!deviceRecord.hardwareSignatureHash) {
+    return true;
+  }
+  if (deviceRecord.hardwareSignatureHash === detected.hardwareSignatureHash) {
+    return true;
+  }
+  // Recompute canonical signature from stored hardware fields (handles OS-update normalized strings)
+  const recomputed = computeHardwareSignatureSync({
+    deviceFingerprint: deviceRecord.deviceFingerprint,
+    hardwareModelOs: deviceRecord.hardwareModelOs || detected.hardwareModelOs,
+    hardwareDeviceType:
+      deviceRecord.hardwareDeviceType || detected.hardwareDeviceType,
+    clientMode: deviceRecord.clientMode || detected.clientMode,
+  });
+  return recomputed === detected.hardwareSignatureHash;
+}
+
 function bufferToBase64Url(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   let str = '';
@@ -317,13 +368,23 @@ export async function registerBiometricUnlock(params: {
     credentialId = `bio_touch_${bufferToBase64Url(fallbackBytes.buffer)}`;
   }
 
+  const devProfile = getDetectedDeviceProfile();
+  const { wrappedKeysPayload, keyWrapSaltBase64 } =
+    await wrapLocalDeviceKeysPayload({
+      dekBase64: params.dekBase64,
+      mergedDeks: params.mergedDeksBase64 || [],
+      deviceFingerprint: devProfile.deviceFingerprint,
+      hardwareSignatureHash: devProfile.hardwareSignatureHash,
+      bindingToken: credentialId,
+    });
+
   const profile: StoredBiometricProfile = {
     memberId: params.memberId,
     username: params.username,
     fullName: params.fullName,
     credentialIdBase64: credentialId,
-    dekBase64: params.dekBase64,
-    mergedDeksBase64: params.mergedDeksBase64,
+    wrappedKeysPayload,
+    keyWrapSaltBase64,
     registeredAt: new Date().toISOString(),
   };
 
@@ -331,7 +392,7 @@ export async function registerBiometricUnlock(params: {
   return { credentialId, usedNativeWebAuthn };
 }
 
-export async function authenticateWithBiometrics(): Promise<StoredBiometricProfile> {
+export async function authenticateWithBiometrics(): Promise<UnlockedBiometricKeys> {
   const stored = getStoredBiometricProfile();
   if (!stored) {
     throw new Error('Brak skonfigurowanego odcisku palca na tym urządzeniu.');
@@ -370,7 +431,70 @@ export async function authenticateWithBiometrics(): Promise<StoredBiometricProfi
     }
   }
 
-  return stored;
+  const devProfile = getDetectedDeviceProfile();
+
+  if (stored.wrappedKeysPayload && stored.keyWrapSaltBase64) {
+    const unwrapped = await unwrapLocalDeviceKeysPayload({
+      wrappedKeysPayload: stored.wrappedKeysPayload,
+      keyWrapSaltBase64: stored.keyWrapSaltBase64,
+      deviceFingerprint: devProfile.deviceFingerprint,
+      hardwareSignatureHash: devProfile.hardwareSignatureHash,
+      bindingToken: stored.credentialIdBase64,
+    });
+    return {
+      memberId: stored.memberId,
+      username: stored.username,
+      fullName: stored.fullName,
+      credentialIdBase64: stored.credentialIdBase64,
+      dekBase64: unwrapped.dekBase64,
+      mergedDeksBase64: unwrapped.mergedDeks,
+      registeredAt: stored.registeredAt,
+    };
+  }
+
+  // Seamless migration for legacy plaintext profiles: encrypt immediately and remove plaintext fields
+  if (stored.dekBase64) {
+    const legacyDek = stored.dekBase64;
+    const legacyMerged = stored.mergedDeksBase64 || [];
+    try {
+      const { wrappedKeysPayload, keyWrapSaltBase64 } =
+        await wrapLocalDeviceKeysPayload({
+          dekBase64: legacyDek,
+          mergedDeks: legacyMerged,
+          deviceFingerprint: devProfile.deviceFingerprint,
+          hardwareSignatureHash: devProfile.hardwareSignatureHash,
+          bindingToken: stored.credentialIdBase64,
+        });
+      const migrated: StoredBiometricProfile = {
+        memberId: stored.memberId,
+        username: stored.username,
+        fullName: stored.fullName,
+        credentialIdBase64: stored.credentialIdBase64,
+        wrappedKeysPayload,
+        keyWrapSaltBase64,
+        registeredAt: stored.registeredAt,
+      };
+      localStorage.setItem(
+        BIOMETRIC_VAULT_STORAGE_KEY,
+        JSON.stringify(migrated)
+      );
+    } catch {
+      // ignore storage migration error
+    }
+    return {
+      memberId: stored.memberId,
+      username: stored.username,
+      fullName: stored.fullName,
+      credentialIdBase64: stored.credentialIdBase64,
+      dekBase64: legacyDek,
+      mergedDeksBase64: legacyMerged,
+      registeredAt: stored.registeredAt,
+    };
+  }
+
+  throw new Error(
+    'Nie udało się odszyfrować klucza biometrycznego urządzenia (Wrapped Key). Zaloguj się hasłem, aby odświeżyć profil biometryczny.'
+  );
 }
 
 /**
