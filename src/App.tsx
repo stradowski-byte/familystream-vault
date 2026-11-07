@@ -9,6 +9,13 @@ import {
   Search,
   Eraser,
   RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
+  BellRing,
+  Tv,
+  Send,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import {
   onAuthStateChanged,
@@ -54,8 +61,11 @@ import {
   isCoAdmin,
   isPrimaryAdmin,
   Member,
+  parsePasswordCardExtras,
   parseSubAccounts,
   PasswordRecord,
+  PasswordSosReason,
+  serializePasswordCardExtras,
   SubAccountEntry,
   ThemeMode,
   VaultCategory,
@@ -68,6 +78,7 @@ import {
   encryptVaultBackupFile,
   generateRandomDekBase64,
   generateSaltBase64,
+  generateStrongPassword,
   hashPasswordForAuth,
   unwrapDekFromMergeEscrow,
   unwrapDekWithHardwareCertificate,
@@ -205,6 +216,16 @@ export default function App() {
   >('all');
   const [sortBy, setSortBy] = useState<'alpha' | 'updated' | 'newest'>('alpha');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [isHealthAuditOpen, setIsHealthAuditOpen] = useState(false);
+  const [rotatingPasswordId, setRotatingPasswordId] = useState<string | null>(
+    null
+  );
+  const [topBannerSosCodes, setTopBannerSosCodes] = useState<
+    Record<string, string>
+  >({});
+  const [resolvingSosRecordId, setResolvingSosRecordId] = useState<
+    string | null
+  >(null);
 
   // Clipboard auto-clear timer state
   const [clipboardCountdown, setClipboardCountdown] = useState<{
@@ -1870,9 +1891,13 @@ export default function App() {
       rawAllowed,
       record.ownerId
     );
+    const currentExtras = parsePasswordCardExtras(record);
 
     await savePasswordToFirestore(record.id, {
-      subAccountsJson: JSON.stringify(nextSubAccounts),
+      subAccountsJson: serializePasswordCardExtras({
+        ...currentExtras,
+        subAccounts: nextSubAccounts,
+      }),
       allowedMemberIds: nextAllowed,
       updatedAt: now,
       passwordUpdatedAt: now,
@@ -1885,6 +1910,153 @@ export default function App() {
       `Zaktualizowano subkonta domowników dla serwisu ${record.serviceName} (${nextSubAccounts.length} subkont).`
     );
     showToast(`Zaktualizowano subkonta w serwisie ${record.serviceName}!`);
+  };
+
+  const handleToggleFavorite = async (record: PasswordRecord) => {
+    if (!currentMember) return;
+    const now = new Date().toISOString();
+    const currentExtras = parsePasswordCardExtras(record);
+    const isAlreadyFav = currentExtras.favoriteMemberIds.includes(
+      currentMember.id
+    );
+    const nextFavorites = isAlreadyFav
+      ? currentExtras.favoriteMemberIds.filter((id) => id !== currentMember.id)
+      : [...currentExtras.favoriteMemberIds, currentMember.id];
+
+    await savePasswordToFirestore(record.id, {
+      subAccountsJson: serializePasswordCardExtras({
+        ...currentExtras,
+        favoriteMemberIds: nextFavorites,
+      }),
+      updatedAt: now,
+    });
+
+    showToast(
+      isAlreadyFav
+        ? 'Usunięto kartę z ulubionych.'
+        : 'Przypięto kartę do ulubionych (na górze listy)!'
+    );
+  };
+
+  const handleCreateSosRequest = async (
+    record: PasswordRecord,
+    reason: PasswordSosReason
+  ) => {
+    if (!currentMember || record.section === 'private') return;
+    const now = new Date().toISOString();
+    const currentExtras = parsePasswordCardExtras(record);
+
+    await savePasswordToFirestore(record.id, {
+      subAccountsJson: serializePasswordCardExtras({
+        ...currentExtras,
+        sosTicket: {
+          id: makeId('sos'),
+          status: 'pending',
+          reason,
+          requestedByMemberId: currentMember.id,
+          requestedByMemberName: currentMember.fullName,
+          targetOwnerId: record.ownerId,
+          targetOwnerName: record.ownerName,
+          createdAt: now,
+        },
+      }),
+      updatedAt: now,
+    });
+
+    await logActivityInFirestore(
+      currentMember.id,
+      currentMember.fullName,
+      'SOS_REQUEST_SENT_TO_OWNER',
+      `Wysłano prośbę SOS (${
+        reason === 'tv_code' ? 'Kod na TV' : 'Hasło nie działa'
+      }) dla serwisu ${record.serviceName} bezpośrednio do właściciela hasła: ${
+        record.ownerName
+      }.`
+    );
+    showToast(
+      `Wysłano prośbę do właściciela hasła (${record.ownerName})! Gdy odpowie, okno Lupy otworzy się automatycznie.`
+    );
+  };
+
+  const handleResolveSosRequest = async (
+    record: PasswordRecord,
+    responseCode: string,
+    newPassword?: string
+  ) => {
+    if (!currentMember || record.section === 'private') return;
+    const now = new Date().toISOString();
+    const currentExtras = parsePasswordCardExtras(record);
+    const existingTicket = currentExtras.sosTicket;
+    if (!existingTicket) return;
+
+    const nextSubAccountsJson = serializePasswordCardExtras({
+      ...currentExtras,
+      sosTicket: {
+        ...existingTicket,
+        status: 'resolved',
+        responseCode: responseCode.trim() || undefined,
+        resolvedAt: now,
+        resolvedByName: currentMember.fullName,
+      },
+    });
+
+    const updates: Partial<PasswordRecord> = {
+      subAccountsJson: nextSubAccountsJson,
+      updatedAt: now,
+    };
+
+    if (newPassword && newPassword.trim()) {
+      updates.passwordValue = newPassword.trim();
+      updates.passwordUpdatedAt = now;
+    }
+
+    await savePasswordToFirestore(record.id, updates);
+
+    await logActivityInFirestore(
+      currentMember.id,
+      currentMember.fullName,
+      'SOS_RESOLVED_BY_OWNER',
+      `Właściciel hasła (${currentMember.fullName}) odpowiedział na zgłoszenie SOS od ${
+        existingTicket.requestedByMemberName
+      } w serwisie ${record.serviceName}${
+        responseCode.trim() ? ' (wysłano kod TV do okna Lupy)' : ''
+      }.`
+    );
+    showToast(
+      `Wysłano odpowiedź do ${existingTicket.requestedByMemberName} — okno Lupy otworzyło się u domownika!`
+    );
+  };
+
+  const handleClearSosRequest = async (record: PasswordRecord) => {
+    if (!currentMember || record.section === 'private') return;
+    const now = new Date().toISOString();
+    const currentExtras = parsePasswordCardExtras(record);
+
+    await savePasswordToFirestore(record.id, {
+      subAccountsJson: serializePasswordCardExtras({
+        ...currentExtras,
+        sosTicket: null,
+      }),
+      updatedAt: now,
+    });
+  };
+
+  const handleOneClickRotateAuditPassword = async (record: PasswordRecord) => {
+    if (!currentMember) return;
+    setRotatingPasswordId(record.id);
+    try {
+      const freshPassword = generateStrongPassword(16);
+      await handleQuickUpdatePassword(record, freshPassword);
+      showToast(
+        `Wygenerowano i zapisano nowe 16-znakowe hasło dla: ${
+          record.section === 'private'
+            ? decryptedPrivateMap[record.id]?.serviceName || record.serviceName
+            : record.serviceName
+        }!`
+      );
+    } finally {
+      setRotatingPasswordId(null);
+    }
   };
 
   const handleQuickUpdatePassword = async (
@@ -2509,7 +2681,7 @@ export default function App() {
     }
   };
 
-  // Filtered & sorted passwords for current user's personal view
+  // Filtered & sorted passwords for current user's personal view (Favorites always pinned at the top!)
   const filterAndSortRecords = (list: PasswordRecord[]) => {
     return list
       .filter((rec) => {
@@ -2542,6 +2714,17 @@ export default function App() {
         return true;
       })
       .sort((a, b) => {
+        if (currentMember) {
+          const favA = parsePasswordCardExtras(a).favoriteMemberIds.includes(
+            currentMember.id
+          );
+          const favB = parsePasswordCardExtras(b).favoriteMemberIds.includes(
+            currentMember.id
+          );
+          if (favA !== favB) {
+            return favA ? -1 : 1;
+          }
+        }
         if (sortBy === 'updated') {
           return (
             new Date(b.passwordUpdatedAt || b.updatedAt).getTime() -
@@ -2643,6 +2826,162 @@ export default function App() {
           )
         )
       : [];
+
+  // Live SOS / TV Code requests routed strictly to the founder/owner of the password (`p.ownerId === currentMember.id`)
+  const pendingSosForMyOwnedPasswords = currentMember
+    ? passwords.filter(
+        (p) =>
+          p.section === 'shared' &&
+          p.ownerId === currentMember.id &&
+          parsePasswordCardExtras(p).sosTicket?.status === 'pending'
+      )
+    : [];
+
+  // Client-side Password Health Audit (Duplicates, Age > 180 days, Weak Passwords < 10 chars)
+  const passwordHealthAudit = (() => {
+    if (!currentMember) {
+      return {
+        totalAudited: 0,
+        healthScore: 100,
+        duplicates: [] as { record: PasswordRecord; serviceName: string }[],
+        oldPasswords: [] as {
+          record: PasswordRecord;
+          serviceName: string;
+          daysOld: number;
+        }[],
+        weakPasswords: [] as {
+          record: PasswordRecord;
+          serviceName: string;
+          reason: string;
+        }[],
+      };
+    }
+
+    const auditableRecords = [
+      ...passwords.filter(
+        (p) =>
+          p.section === 'shared' &&
+          (p.ownerId === currentMember.id ||
+            p.allowedMemberIds.includes(currentMember.id))
+      ),
+      ...passwords.filter(
+        (p) => p.section === 'private' && p.ownerId === currentMember.id
+      ),
+    ];
+
+    const resolvedItems = auditableRecords
+      .map((rec) => {
+        const isPriv = rec.section === 'private';
+        const dec = isPriv ? decryptedPrivateMap[rec.id] : null;
+        const plainPassword = isPriv
+          ? dec?.password || (rec.revealToAdmin ? rec.passwordValue : '')
+          : rec.passwordValue;
+        const serviceName = isPriv
+          ? dec?.serviceName ||
+            (rec.revealToAdmin ? rec.serviceName : 'Wpis prywatny')
+          : rec.serviceName;
+        return {
+          record: rec,
+          plainPassword: plainPassword.trim(),
+          serviceName,
+        };
+      })
+      .filter((item) => item.plainPassword.length > 0);
+
+    const passwordCounts = new Map<string, number>();
+    for (const item of resolvedItems) {
+      passwordCounts.set(
+        item.plainPassword,
+        (passwordCounts.get(item.plainPassword) || 0) + 1
+      );
+    }
+
+    const duplicates: { record: PasswordRecord; serviceName: string }[] = [];
+    const oldPasswords: {
+      record: PasswordRecord;
+      serviceName: string;
+      daysOld: number;
+    }[] = [];
+    const weakPasswords: {
+      record: PasswordRecord;
+      serviceName: string;
+      reason: string;
+    }[] = [];
+
+    const nowMs = Date.now();
+    const MS_PER_DAY = 1000 * 60 * 60 * 24;
+
+    for (const item of resolvedItems) {
+      if ((passwordCounts.get(item.plainPassword) || 0) > 1) {
+        duplicates.push({
+          record: item.record,
+          serviceName: item.serviceName,
+        });
+      }
+
+      const updatedIso =
+        item.record.passwordUpdatedAt ||
+        item.record.updatedAt ||
+        item.record.createdAt;
+      if (updatedIso) {
+        const daysOld = Math.floor(
+          (nowMs - new Date(updatedIso).getTime()) / MS_PER_DAY
+        );
+        if (daysOld > 180) {
+          oldPasswords.push({
+            record: item.record,
+            serviceName: item.serviceName,
+            daysOld,
+          });
+        }
+      }
+
+      const pw = item.plainPassword;
+      const hasDigit = /[0-9]/.test(pw);
+      const hasUpper = /[A-ZĄĆĘŁŃÓŚŹŻ]/.test(pw);
+      const hasLower = /[a-ząćęłńóśźż]/.test(pw);
+      if (pw.length < 10) {
+        weakPasswords.push({
+          record: item.record,
+          serviceName: item.serviceName,
+          reason: `Zbyt krótkie (${pw.length} zn.)`,
+        });
+      } else if (!(hasDigit && (hasUpper || hasLower))) {
+        weakPasswords.push({
+          record: item.record,
+          serviceName: item.serviceName,
+          reason: 'Brak kombinacji liter i cyfr',
+        });
+      }
+    }
+
+    const totalAudited = resolvedItems.length;
+    const totalIssues =
+      duplicates.length + oldPasswords.length + weakPasswords.length;
+    const rawPenalty =
+      totalAudited > 0
+        ? Math.round(
+            ((duplicates.length * 18 +
+              weakPasswords.length * 15 +
+              oldPasswords.length * 10) /
+              Math.max(totalAudited, 1))
+          )
+        : 0;
+    const healthScore =
+      totalAudited === 0
+        ? 100
+        : totalIssues === 0
+          ? 100
+          : Math.max(15, Math.min(96, 100 - rawPenalty));
+
+    return {
+      totalAudited,
+      healthScore,
+      duplicates,
+      oldPasswords,
+      weakPasswords,
+    };
+  })();
 
   const currentDeviceDoc = currentMember
     ? devices.find(
@@ -2921,7 +3260,372 @@ export default function App() {
               />
                           ) : (
               /* CLEAN PASSWORD VAULT VIEW (Identical privacy rules for all users + Section 03 for revealed entries) */
-              <div className="space-y-8">
+              <div className="space-y-6">
+                {/* 1. LIVE OWNER-ROUTED SOS / TV CODE ALERT BANNER (Shown ONLY to the founder/owner of the password when a family member requests TV code or reports broken password) */}
+                {pendingSosForMyOwnedPasswords.length > 0 && (
+                  <div className="p-4 rounded-xl border-2 border-[var(--vault-warning)] bg-[var(--vault-surface)] space-y-3">
+                    <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-[var(--vault-warning)]">
+                      <BellRing className="w-4 h-4 animate-bounce shrink-0" />
+                      <span>
+                        Aktywna prośba SOS do Ciebie jako właściciela hasła ({pendingSosForMyOwnedPasswords.length})
+                      </span>
+                    </div>
+                    <div className="space-y-2.5">
+                      {pendingSosForMyOwnedPasswords.map((sosRec) => {
+                        const ticket = parsePasswordCardExtras(sosRec).sosTicket;
+                        if (!ticket) return null;
+                        const inputVal = topBannerSosCodes[sosRec.id] || '';
+                        const isResolvingThis =
+                          resolvingSosRecordId === sosRec.id;
+                        return (
+                          <form
+                            key={`top_sos_${sosRec.id}`}
+                            onSubmit={async (e) => {
+                              e.preventDefault();
+                              if (!inputVal.trim() || isResolvingThis) return;
+                              setResolvingSosRecordId(sosRec.id);
+                              try {
+                                await handleResolveSosRequest(
+                                  sosRec,
+                                  inputVal.trim()
+                                );
+                                setTopBannerSosCodes((prev) => ({
+                                  ...prev,
+                                  [sosRec.id]: '',
+                                }));
+                              } finally {
+                                setResolvingSosRecordId(null);
+                              }
+                            }}
+                            className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] flex flex-col lg:flex-row lg:items-center justify-between gap-3 text-xs"
+                          >
+                            <div className="space-y-0.5">
+                              <div className="font-semibold text-[var(--vault-text)] flex flex-wrap items-center gap-1.5">
+                                <Tv className="w-3.5 h-3.5 text-[var(--vault-warning)] shrink-0" />
+                                <span>
+                                  Serwis: <strong>{sosRec.serviceName}</strong> · Domownik:{' '}
+                                  <strong className="text-[var(--vault-accent)]">
+                                    {ticket.requestedByMemberName}
+                                  </strong>
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-[var(--vault-muted)]">
+                                Powód:{' '}
+                                <strong>
+                                  {ticket.reason === 'tv_code'
+                                    ? 'Prosi o kod autoryzacyjny na TV / PIN'
+                                    : 'Zgłasza, że hasło nie działa'}
+                                </strong>{' '}
+                                — po wysłaniu kodu u domownika automatycznie otworzy się duże okno Lupy.
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              <input
+                                type="text"
+                                value={inputVal}
+                                onChange={(e) =>
+                                  setTopBannerSosCodes((prev) => ({
+                                    ...prev,
+                                    [sosRec.id]: e.target.value,
+                                  }))
+                                }
+                                placeholder="Kod na TV (np. 4829)..."
+                                maxLength={32}
+                                className="px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-warning)]"
+                              />
+                              <button
+                                type="submit"
+                                disabled={!inputVal.trim() || isResolvingThis}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] disabled:opacity-50 rounded-lg cursor-pointer"
+                              >
+                                <Send className="w-3.5 h-3.5" />
+                                <span>
+                                  {isResolvingThis
+                                    ? 'Wysyłanie...'
+                                    : 'Wyślij kod do Lupy'}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleClearSosRequest(sosRec)}
+                                className="px-2.5 py-1.5 text-xs text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded-lg cursor-pointer"
+                              >
+                                Zamknij
+                              </button>
+                            </div>
+                          </form>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* 2. INTERACTIVE PASSWORD HEALTH AUDIT BAR (Duplicates, Age > 180 days, Weak Passwords + 1-Click Rotation) */}
+                {passwordHealthAudit.totalAudited > 0 && (
+                  <div className="rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setIsHealthAuditOpen((v) => !v)}
+                      className="w-full px-4 py-3 flex flex-wrap items-center justify-between gap-3 text-left hover:bg-[var(--vault-surface-hover)] transition-colors cursor-pointer"
+                    >
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        {passwordHealthAudit.healthScore >= 85 ? (
+                          <ShieldCheck className="w-4 h-4 text-[var(--vault-success)] shrink-0" />
+                        ) : (
+                          <ShieldAlert className="w-4 h-4 text-[var(--vault-warning)] shrink-0" />
+                        )}
+                        <span className="text-xs sm:text-sm font-bold font-display text-[var(--vault-text)]">
+                          Audyt Kondycji Haseł:{' '}
+                          <span
+                            className={`tabular-nums ${
+                              passwordHealthAudit.healthScore >= 85
+                                ? 'text-[var(--vault-success)]'
+                                : 'text-[var(--vault-warning)]'
+                            }`}
+                          >
+                            {passwordHealthAudit.healthScore}%
+                          </span>
+                        </span>
+                        <span className="text-xs text-[var(--vault-muted)] tabular-nums">
+                          · Duplikaty:{' '}
+                          <strong
+                            className={
+                              passwordHealthAudit.duplicates.length > 0
+                                ? 'text-[var(--vault-warning)]'
+                                : 'text-[var(--vault-text)]'
+                            }
+                          >
+                            {passwordHealthAudit.duplicates.length}
+                          </strong>{' '}
+                          · Stare (&gt;180 dni):{' '}
+                          <strong
+                            className={
+                              passwordHealthAudit.oldPasswords.length > 0
+                                ? 'text-[var(--vault-warning)]'
+                                : 'text-[var(--vault-text)]'
+                            }
+                          >
+                            {passwordHealthAudit.oldPasswords.length}
+                          </strong>{' '}
+                          · Słabe:{' '}
+                          <strong
+                            className={
+                              passwordHealthAudit.weakPasswords.length > 0
+                                ? 'text-[var(--vault-warning)]'
+                                : 'text-[var(--vault-text)]'
+                            }
+                          >
+                            {passwordHealthAudit.weakPasswords.length}
+                          </strong>
+                        </span>
+                      </div>
+
+                      <div className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--vault-accent)] shrink-0">
+                        <span>
+                          {isHealthAuditOpen
+                            ? 'Ukryj raport audytu'
+                            : 'Pokaż raport i wymień 1-Klik'}
+                        </span>
+                        {isHealthAuditOpen ? (
+                          <ChevronUp className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        )}
+                      </div>
+                    </button>
+
+                    {isHealthAuditOpen && (
+                      <div className="p-4 border-t border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-3 text-xs">
+                        {passwordHealthAudit.duplicates.length === 0 &&
+                        passwordHealthAudit.oldPasswords.length === 0 &&
+                        passwordHealthAudit.weakPasswords.length === 0 ? (
+                          <div className="flex items-center gap-2 text-[var(--vault-success)] font-medium">
+                            <ShieldCheck className="w-4 h-4 shrink-0" />
+                            <span>
+                              Wzorowa higiena haseł! Wszystkie Twoje wpisy ({passwordHealthAudit.totalAudited}) są unikalne, silne i aktualne.
+                            </span>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                            {/* Column 1: Duplicates */}
+                            <div className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-2">
+                              <div className="font-bold text-[var(--vault-text)] flex items-center justify-between">
+                                <span>Powtórzone hasła (Duplikaty)</span>
+                                <span className="tabular-nums text-[var(--vault-warning)]">
+                                  {passwordHealthAudit.duplicates.length}
+                                </span>
+                              </div>
+                              {passwordHealthAudit.duplicates.length === 0 ? (
+                                <p className="text-[11px] text-[var(--vault-muted)]">
+                                  Brak duplikatów — każde konto ma inne hasło.
+                                </p>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {passwordHealthAudit.duplicates.map((item) => {
+                                    const canRotate =
+                                      item.record.ownerId === currentMember.id ||
+                                      (item.record.section === 'shared' &&
+                                        (isOwnerAdmin || isTrustedCoAdmin));
+                                    return (
+                                      <div
+                                        key={`dup_${item.record.id}`}
+                                        className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--vault-border)]"
+                                      >
+                                        <span className="truncate font-medium text-[var(--vault-text)]">
+                                          {item.serviceName}
+                                        </span>
+                                        {canRotate && (
+                                          <button
+                                            type="button"
+                                            disabled={
+                                              rotatingPasswordId ===
+                                              item.record.id
+                                            }
+                                            onClick={() =>
+                                              handleOneClickRotateAuditPassword(
+                                                item.record
+                                              )
+                                            }
+                                            className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded cursor-pointer shrink-0"
+                                          >
+                                            <RefreshCw className="w-3 h-3" />
+                                            <span>Wymień 1-Klik</span>
+                                          </button>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Column 2: Weak Passwords */}
+                            <div className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-2">
+                              <div className="font-bold text-[var(--vault-text)] flex items-center justify-between">
+                                <span>Słabe hasła (&lt;10 zn.)</span>
+                                <span className="tabular-nums text-[var(--vault-warning)]">
+                                  {passwordHealthAudit.weakPasswords.length}
+                                </span>
+                              </div>
+                              {passwordHealthAudit.weakPasswords.length === 0 ? (
+                                <p className="text-[11px] text-[var(--vault-muted)]">
+                                  Wszystkie hasła mają odpowiednią długość i złożoność.
+                                </p>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {passwordHealthAudit.weakPasswords.map(
+                                    (item) => {
+                                      const canRotate =
+                                        item.record.ownerId ===
+                                          currentMember.id ||
+                                        (item.record.section === 'shared' &&
+                                          (isOwnerAdmin || isTrustedCoAdmin));
+                                      return (
+                                        <div
+                                          key={`weak_${item.record.id}`}
+                                          className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--vault-border)]"
+                                        >
+                                          <div className="min-w-0">
+                                            <span className="truncate font-medium text-[var(--vault-text)] block">
+                                              {item.serviceName}
+                                            </span>
+                                            <span className="text-[10px] text-[var(--vault-muted)] block">
+                                              {item.reason}
+                                            </span>
+                                          </div>
+                                          {canRotate && (
+                                            <button
+                                              type="button"
+                                              disabled={
+                                                rotatingPasswordId ===
+                                                item.record.id
+                                              }
+                                              onClick={() =>
+                                                handleOneClickRotateAuditPassword(
+                                                  item.record
+                                                )
+                                              }
+                                              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded cursor-pointer shrink-0"
+                                            >
+                                              <RefreshCw className="w-3 h-3" />
+                                              <span>Wymień 1-Klik</span>
+                                            </button>
+                                          )}
+                                        </div>
+                                      );
+                                    }
+                                  )}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Column 3: Old Passwords (>180 days) */}
+                            <div className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-2">
+                              <div className="font-bold text-[var(--vault-text)] flex items-center justify-between">
+                                <span>Stare hasła (&gt;180 dni)</span>
+                                <span className="tabular-nums text-[var(--vault-warning)]">
+                                  {passwordHealthAudit.oldPasswords.length}
+                                </span>
+                              </div>
+                              {passwordHealthAudit.oldPasswords.length === 0 ? (
+                                <p className="text-[11px] text-[var(--vault-muted)]">
+                                  Wszystkie hasła były aktualizowane w ciągu ostatnich 6 miesięcy.
+                                </p>
+                              ) : (
+                                <div className="space-y-1.5">
+                                  {passwordHealthAudit.oldPasswords.map(
+                                    (item) => {
+                                      const canRotate =
+                                        item.record.ownerId ===
+                                          currentMember.id ||
+                                        (item.record.section === 'shared' &&
+                                          (isOwnerAdmin || isTrustedCoAdmin));
+                                      return (
+                                        <div
+                                          key={`old_${item.record.id}`}
+                                          className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--vault-border)]"
+                                        >
+                                          <div className="min-w-0">
+                                            <span className="truncate font-medium text-[var(--vault-text)] block">
+                                              {item.serviceName}
+                                            </span>
+                                            <span className="text-[10px] text-[var(--vault-muted)] block tabular-nums">
+                                              Wiek: {item.daysOld} dni
+                                            </span>
+                                          </div>
+                                          {canRotate && (
+                                            <button
+                                              type="button"
+                                              disabled={
+                                                rotatingPasswordId ===
+                                                item.record.id
+                                              }
+                                              onClick={() =>
+                                                handleOneClickRotateAuditPassword(
+                                                  item.record
+                                                )
+                                              }
+                                              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded cursor-pointer shrink-0"
+                                            >
+                                              <RefreshCw className="w-3 h-3" />
+                                              <span>Wymień 1-Klik</span>
+                                            </button>
+                                          )}
+                                        </div>
+                                      );
+                                    }
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Search, Section Quick-Filter, Category Filter & Sort Toolbar */}
                 <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] space-y-3">
                   <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -3071,6 +3775,10 @@ export default function App() {
                               onQuickUpdatePassword={handleQuickUpdatePassword}
                               onUpdateAllowedMembers={handleUpdateAllowedMembers}
                               onUpdateSubAccounts={handleUpdateSubAccounts}
+                              onToggleFavorite={handleToggleFavorite}
+                              onCreateSosRequest={handleCreateSosRequest}
+                              onResolveSosRequest={handleResolveSosRequest}
+                              onClearSosRequest={handleClearSosRequest}
                               onDeleteRecord={handleDeleteRecord}
                               onStartClipboardCountdown={startClipboardCountdown}
                             />
@@ -3126,6 +3834,7 @@ export default function App() {
                               onUpdateAllowedMembers={handleUpdateAllowedMembers}
                               onUpdateSubAccounts={handleUpdateSubAccounts}
                               onToggleRevealToAdmin={handleToggleRevealToAdmin}
+                              onToggleFavorite={handleToggleFavorite}
                               onDeleteRecord={handleDeleteRecord}
                               onStartClipboardCountdown={startClipboardCountdown}
                             />
@@ -3186,6 +3895,7 @@ export default function App() {
                                   handleUpdateAllowedMembers
                                 }
                                 onUpdateSubAccounts={handleUpdateSubAccounts}
+                                onToggleFavorite={handleToggleFavorite}
                                 onDeleteRecord={handleDeleteRecord}
                                 onStartClipboardCountdown={
                                   startClipboardCountdown

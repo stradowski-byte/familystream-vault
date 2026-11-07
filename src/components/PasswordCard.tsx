@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Copy,
   Check,
@@ -15,14 +15,22 @@ import {
   UserPlus,
   ZoomIn,
   X,
+  Star,
+  QrCode,
+  Tv,
+  BellRing,
+  AlertTriangle,
+  Send,
 } from 'lucide-react';
 import {
   DecryptedPrivatePayload,
   getEffectiveCoAdminPermissions,
   isPrimaryAdmin,
   Member,
+  parsePasswordCardExtras,
   parseSubAccounts,
   PasswordRecord,
+  PasswordSosReason,
   SubAccountEntry,
   VaultCategory,
 } from '../types/vault';
@@ -31,6 +39,7 @@ import {
   sanitizeSafeHttpUrl,
 } from '../lib/crypto';
 import { prepareOneClickLaunch } from '../lib/deviceAndBiometrics';
+import { buildWifiQrPayload, generateQrCodeMatrix } from '../lib/qrCodeSvg';
 
 interface PasswordCardProps {
   record: PasswordRecord;
@@ -52,6 +61,17 @@ interface PasswordCardProps {
     record: PasswordRecord,
     nextReveal: boolean
   ) => Promise<void>;
+  onToggleFavorite?: (record: PasswordRecord) => Promise<void>;
+  onCreateSosRequest?: (
+    record: PasswordRecord,
+    reason: PasswordSosReason
+  ) => Promise<void>;
+  onResolveSosRequest?: (
+    record: PasswordRecord,
+    responseCode: string,
+    newPassword?: string
+  ) => Promise<void>;
+  onClearSosRequest?: (record: PasswordRecord) => Promise<void>;
   onDeleteRecord: (record: PasswordRecord) => Promise<void>;
   onStartClipboardCountdown: (seconds: number, label: string) => void;
 }
@@ -69,6 +89,10 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
   onUpdateAllowedMembers,
   onUpdateSubAccounts,
   onToggleRevealToAdmin,
+  onToggleFavorite,
+  onCreateSosRequest,
+  onResolveSosRequest,
+  onClearSosRequest,
   onDeleteRecord,
   onStartClipboardCountdown,
 }) => {
@@ -90,7 +114,21 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
     subtitle: string;
     login: string;
     password: string;
+    tvAuthCode?: string;
   } | null>(null);
+
+  // Favorites, Wi-Fi QR Modal & Owner-Routed SOS / TV Code state
+  const [isTogglingFavorite, setIsTogglingFavorite] = useState(false);
+  const [isQrModalOpen, setIsQrModalOpen] = useState(false);
+  const [wifiSsidInput, setWifiSsidInput] = useState('');
+  const [isSosMenuOpen, setIsSosMenuOpen] = useState(false);
+  const [isSendingSos, setIsSendingSos] = useState(false);
+  const [ownerSosCodeInput, setOwnerSosCodeInput] = useState('');
+  const [ownerSosNewPassInput, setOwnerSosNewPassInput] = useState('');
+  const [isResolvingSos, setIsResolvingSos] = useState(false);
+  const [lastAutoOpenedSosTimestamp, setLastAutoOpenedSosTimestamp] = useState<
+    string | null
+  >(null);
 
   // Sub-accounts state (for Netflix +10 zł / family multi-accounts)
   const [revealedSubPassIds, setRevealedSubPassIds] = useState<string[]>([]);
@@ -112,6 +150,10 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
     getEffectiveCoAdminPermissions(currentMember).canManagePasswordsAndVod;
   const isOwnerOrAdmin = isOwner || isAdmin;
   const canManageAccess = !isPrivate && isOwnerOrAdmin;
+
+  const cardExtras = useMemo(() => parsePasswordCardExtras(record), [record]);
+  const isFavorite = cardExtras.favoriteMemberIds.includes(currentMember.id);
+  const sosTicket = !isPrivate ? cardExtras.sosTicket : null;
 
   const subAccounts = !isPrivate ? parseSubAccounts(record) : [];
   const myAssignedSubAccount =
@@ -331,18 +373,144 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
       })
     : '';
 
+  // Automatically pop open the huge Magnifier ("Lupa") modal on the requester's device when the password owner resolves the SOS ticket!
+  useEffect(() => {
+    if (
+      sosTicket &&
+      sosTicket.status === 'resolved' &&
+      sosTicket.requestedByMemberId === currentMember.id &&
+      sosTicket.resolvedAt &&
+      sosTicket.resolvedAt !== lastAutoOpenedSosTimestamp
+    ) {
+      setLastAutoOpenedSosTimestamp(sosTicket.resolvedAt);
+      setShowPassword(true);
+      setMagnifiedViewData({
+        title: displayServiceName,
+        subtitle: sosTicket.responseCode
+          ? `Kod autoryzacyjny TV od właściciela (${record.ownerName})`
+          : `Zaktualizowane hasło od właściciela (${record.ownerName})`,
+        login: displayLogin,
+        password: displayPassword,
+        tvAuthCode: sosTicket.responseCode || undefined,
+      });
+    }
+  }, [
+    sosTicket,
+    currentMember.id,
+    lastAutoOpenedSosTimestamp,
+    displayServiceName,
+    record.ownerName,
+    displayLogin,
+    displayPassword,
+  ]);
+
+  const handleToggleFavoriteClick = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!onToggleFavorite || isTogglingFavorite) return;
+    setIsTogglingFavorite(true);
+    try {
+      await onToggleFavorite(record);
+    } finally {
+      setIsTogglingFavorite(false);
+    }
+  };
+
+  const handleSendSosClick = async (reason: PasswordSosReason) => {
+    if (!onCreateSosRequest || isSendingSos) return;
+    setIsSendingSos(true);
+    try {
+      await onCreateSosRequest(record, reason);
+      setIsSosMenuOpen(false);
+    } finally {
+      setIsSendingSos(false);
+    }
+  };
+
+  const handleOwnerResolveSosSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!onResolveSosRequest || isResolvingSos) return;
+    const codeTrimmed = ownerSosCodeInput.trim();
+    const newPassTrimmed = ownerSosNewPassInput.trim();
+    if (!codeTrimmed && !newPassTrimmed) return;
+    setIsResolvingSos(true);
+    try {
+      await onResolveSosRequest(
+        record,
+        codeTrimmed,
+        newPassTrimmed || undefined
+      );
+      setOwnerSosCodeInput('');
+      setOwnerSosNewPassInput('');
+    } finally {
+      setIsResolvingSos(false);
+    }
+  };
+
+  const handleClearSosClick = async () => {
+    if (!onClearSosRequest) return;
+    await onClearSosRequest(record);
+  };
+
+  const effectiveWifiSsid =
+    wifiSsidInput.trim() ||
+    (displayLogin && displayLogin !== 'ENC[PRIVATE]'
+      ? displayLogin
+      : displayServiceName);
+
+  const wifiQrMatrix = useMemo(() => {
+    if (!isQrModalOpen) return [];
+    const payload = buildWifiQrPayload(effectiveWifiSsid, displayPassword);
+    return generateQrCodeMatrix(payload);
+  }, [isQrModalOpen, effectiveWifiSsid, displayPassword]);
+
   return (
-    <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-surface)] flex flex-col gap-3 transition-colors">
-      {/* Compact Primary Row: Service Name, Record Type & Owner + Actions ("Uruchom i zaloguj" + "Pokaż detale") */}
+    <div
+      className={`p-4 rounded-xl border bg-[var(--vault-surface)] flex flex-col gap-3 transition-colors ${
+        sosTicket?.status === 'pending' && isOwner
+          ? 'border-[var(--vault-warning)]'
+          : isFavorite
+            ? 'border-[var(--vault-accent)]/70'
+            : 'border-[var(--vault-border)]'
+      }`}
+    >
+      {/* Compact Primary Row: Star Favorite, Service Name, Record Type & Owner + Actions ("Uruchom i zaloguj" + "Pokaż detale") */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div
           onClick={() => setIsDetailsOpen((v) => !v)}
           className="min-w-0 cursor-pointer select-none"
         >
           <div className="flex flex-wrap items-center gap-1.5">
+            {onToggleFavorite && (
+              <button
+                type="button"
+                onClick={handleToggleFavoriteClick}
+                disabled={isTogglingFavorite}
+                title={
+                  isFavorite
+                    ? 'Usuń z ulubionych (odpnij z góry listy)'
+                    : 'Przypnij do ulubionych na górze listy'
+                }
+                className={`p-1 -ml-1 rounded-md transition-colors cursor-pointer shrink-0 ${
+                  isFavorite
+                    ? 'text-[var(--vault-warning)] hover:opacity-80'
+                    : 'text-[var(--vault-muted)] hover:text-[var(--vault-warning)]'
+                }`}
+              >
+                <Star
+                  className={`w-4 h-4 ${
+                    isFavorite ? 'fill-[var(--vault-warning)]' : ''
+                  }`}
+                />
+              </button>
+            )}
             <h3 className="text-base font-semibold font-display text-[var(--vault-text)] truncate">
               {displayServiceName}
             </h3>
+            {isFavorite && (
+              <span className="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border border-[var(--vault-warning)]/50 text-[var(--vault-warning)] shrink-0">
+                Ulubione
+              </span>
+            )}
             <span className="text-xs text-[var(--vault-muted)] shrink-0">
               · {categoryName} (
               {isPrivate
@@ -405,6 +573,143 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
           </button>
         </div>
       </div>
+
+      {/* LIVE OWNER-ROUTED SOS / TV CODE BANNER (Visible even when card is collapsed) */}
+      {!isPrivate && sosTicket && (
+        <>
+          {/* 1. PASSWORD OWNER VIEW: Pending SOS request from a family member */}
+          {isOwner && sosTicket.status === 'pending' && (
+            <form
+              onSubmit={handleOwnerResolveSosSubmit}
+              className="p-3.5 rounded-xl border-2 border-[var(--vault-warning)] bg-[var(--vault-bg)] space-y-2.5 text-xs"
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2 text-[var(--vault-warning)] font-bold">
+                  <BellRing className="w-4 h-4 animate-bounce shrink-0" />
+                  <span>
+                    SOS od domownika: {sosTicket.requestedByMemberName} —{' '}
+                    {sosTicket.reason === 'tv_code'
+                      ? 'Prosi o kod autoryzacyjny na TV / PIN'
+                      : 'Zgłasza, że hasło nie działa'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleClearSosClick}
+                  className="text-[11px] text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer shrink-0"
+                >
+                  Odrzuć
+                </button>
+              </div>
+              <p className="text-[11px] text-[var(--vault-muted)]">
+                Jako założyciel i właściciel tego hasła ({record.ownerName}), wpisz poniżej kod z SMS/e-maila na TV lub nowe hasło. U domownika ({sosTicket.requestedByMemberName}) automatycznie otworzy się pełnoekranowe okno Lupy z Twoją odpowiedzią.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <input
+                  type="text"
+                  value={ownerSosCodeInput}
+                  onChange={(e) => setOwnerSosCodeInput(e.target.value)}
+                  placeholder="Kod na TV / PIN (np. 4829)..."
+                  maxLength={32}
+                  className="px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-warning)]"
+                />
+                <input
+                  type="text"
+                  value={ownerSosNewPassInput}
+                  onChange={(e) => setOwnerSosNewPassInput(e.target.value)}
+                  placeholder="Opcjonalnie: nowe hasło..."
+                  maxLength={256}
+                  className="px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-surface)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-warning)]"
+                />
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={
+                    isResolvingSos ||
+                    (!ownerSosCodeInput.trim() && !ownerSosNewPassInput.trim())
+                  }
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] disabled:opacity-50 rounded-lg cursor-pointer"
+                >
+                  <Send className="w-3.5 h-3.5" />
+                  <span>
+                    {isResolvingSos
+                      ? 'Wysyłanie...'
+                      : `Wyślij do ${sosTicket.requestedByMemberName} (Otwórz Lupę)`}
+                  </span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* 2. REQUESTING FAMILY MEMBER VIEW: Waiting for password owner */}
+          {sosTicket.requestedByMemberId === currentMember.id &&
+            sosTicket.status === 'pending' && (
+              <div className="p-3 rounded-xl border border-[var(--vault-warning)] bg-[var(--vault-bg)] flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 text-[var(--vault-text)]">
+                  <Tv className="w-4 h-4 text-[var(--vault-warning)] animate-pulse shrink-0" />
+                  <span>
+                    Wysłano prośbę ({sosTicket.reason === 'tv_code' ? 'Kod na TV' : 'Problem z hasłem'}) do właściciela hasła:{' '}
+                    <strong>{record.ownerName}</strong>. Gdy odpowie, okno Lupy otworzy się automatycznie.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleClearSosClick}
+                  className="px-2.5 py-1 text-[11px] font-medium text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded-md cursor-pointer shrink-0"
+                >
+                  Odwołaj
+                </button>
+              </div>
+            )}
+
+          {/* 3. REQUESTING FAMILY MEMBER VIEW: Owner responded with TV Code / updated password */}
+          {sosTicket.requestedByMemberId === currentMember.id &&
+            sosTicket.status === 'resolved' && (
+              <div className="p-3 rounded-xl border-2 border-[var(--vault-success)] bg-[var(--vault-bg)] flex flex-wrap items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 text-[var(--vault-text)]">
+                  <Check className="w-4 h-4 text-[var(--vault-success)] shrink-0" />
+                  <span>
+                    Właściciel (<strong>{record.ownerName}</strong>) przesłał odpowiedź!{' '}
+                    {sosTicket.responseCode && (
+                      <strong className="font-mono text-sm text-[var(--vault-accent)] ml-1">
+                        Kod TV: {sosTicket.responseCode}
+                      </strong>
+                    )}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowPassword(true);
+                      setMagnifiedViewData({
+                        title: displayServiceName,
+                        subtitle: sosTicket.responseCode
+                          ? `Kod autoryzacyjny TV od właściciela (${record.ownerName})`
+                          : `Zaktualizowane hasło od właściciela (${record.ownerName})`,
+                        login: displayLogin,
+                        password: displayPassword,
+                        tvAuthCode: sosTicket.responseCode || undefined,
+                      });
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-[#FAF7F2] bg-[var(--vault-accent)] rounded-md cursor-pointer"
+                  >
+                    <ZoomIn className="w-3.5 h-3.5" />
+                    <span>Pokaż w Lupie</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearSosClick}
+                    className="px-2.5 py-1 text-xs font-medium text-[var(--vault-muted)] hover:text-[var(--vault-text)] border border-[var(--vault-border)] rounded-md cursor-pointer"
+                  >
+                    Gotowe
+                  </button>
+                </div>
+              </div>
+            )}
+        </>
+      )}
 
       {/* Expanded Details Section — visible ONLY after clicking "Pokaż detale" */}
       {isDetailsOpen && (
@@ -486,13 +791,87 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
 
           {/* Primary Credentials block (either Main Account for Owner/Admin, or Assigned Sub-Account for Family Member) */}
           <div className="p-3 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2.5">
-            <div className="text-[11px] font-semibold text-[var(--vault-muted)]">
-              {isSubAccountOnlyView && myAssignedSubAccount
-                ? `Twoje przypisane subkonto (${myAssignedSubAccount.label || 'Subkonto rodzinne'})`
-                : isOwnerOrAdmin && subAccounts.length > 0
-                  ? 'Konto główne (Właściciel abonomentu)'
-                  : 'Dane logowania'}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold text-[var(--vault-muted)]">
+                {isSubAccountOnlyView && myAssignedSubAccount
+                  ? `Twoje przypisane subkonto (${myAssignedSubAccount.label || 'Subkonto rodzinne'})`
+                  : isOwnerOrAdmin && subAccounts.length > 0
+                    ? 'Konto główne (Właściciel abonomentu)'
+                    : 'Dane logowania'}
+              </div>
+
+              {/* Quick Tools Row: Kod QR Wi-Fi + SOS / Kod TV do właściciela hasła */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!wifiSsidInput) {
+                      setWifiSsidInput(
+                        displayLogin && displayLogin !== 'ENC[PRIVATE]'
+                          ? displayLogin
+                          : displayServiceName
+                      );
+                    }
+                    setIsQrModalOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-[var(--vault-text)] border border-[var(--vault-border)] rounded-md hover:bg-[var(--vault-surface)] transition-colors cursor-pointer"
+                  title="Pokaż kod QR Wi-Fi do zeskanowania aparatem telefonu"
+                >
+                  <QrCode className="w-3 h-3 text-[var(--vault-accent)]" />
+                  <span>Kod QR Wi-Fi</span>
+                </button>
+
+                {!isPrivate && !isOwner && onCreateSosRequest && (
+                  <button
+                    type="button"
+                    onClick={() => setIsSosMenuOpen((v) => !v)}
+                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-semibold text-[var(--vault-warning)] border border-[var(--vault-warning)]/60 rounded-md hover:bg-[var(--vault-surface)] transition-colors cursor-pointer"
+                    title={`Wyślij prośbę o kod na TV lub zgłoś problem bezpośrednio do założyciela hasła (${record.ownerName})`}
+                  >
+                    <Tv className="w-3 h-3 shrink-0" />
+                    <span>SOS / Kod TV (do: {record.ownerName})</span>
+                  </button>
+                )}
+              </div>
             </div>
+
+            {/* 1-Tap SOS Action Bar for Family Member -> Routed strictly to Password Owner */}
+            {!isPrivate && !isOwner && isSosMenuOpen && (
+              <div className="p-2.5 rounded-lg border border-[var(--vault-warning)]/70 bg-[var(--vault-surface)] space-y-2 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-[var(--vault-text)]">
+                    Wyślij powiadomienie bezpośrednio do założyciela hasła ({record.ownerName}):
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setIsSosMenuOpen(false)}
+                    className="text-[11px] text-[var(--vault-muted)] hover:text-[var(--vault-text)] cursor-pointer"
+                  >
+                    Zamknij
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={isSendingSos}
+                    onClick={() => handleSendSosClick('tv_code')}
+                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
+                  >
+                    <Tv className="w-3.5 h-3.5 shrink-0" />
+                    <span>Poproś {record.ownerName} o kod na TV</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSendingSos}
+                    onClick={() => handleSendSosClick('password_not_working')}
+                    className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold text-[var(--vault-text)] border border-[var(--vault-warning)] hover:bg-[var(--vault-bg)] rounded-lg cursor-pointer"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5 text-[var(--vault-warning)] shrink-0" />
+                    <span>Zgłoś: Hasło nie działa</span>
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Login Row */}
             <div className="flex items-center justify-between gap-3 text-sm">
@@ -562,6 +941,12 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
                           : categoryName,
                       login: displayLogin,
                       password: displayPassword,
+                      tvAuthCode:
+                        sosTicket?.status === 'resolved' &&
+                        sosTicket.requestedByMemberId === currentMember.id &&
+                        sosTicket.responseCode
+                          ? sosTicket.responseCode
+                          : undefined,
                     });
                   }}
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold text-[var(--vault-accent)] border border-[var(--vault-accent)]/60 rounded-lg hover:bg-[var(--vault-surface)] transition-colors cursor-pointer"
@@ -1135,7 +1520,7 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
         </div>
       )}
 
-      {/* CENTRAL HIGH-CONTRAST MAGNIFIER MODAL ("LUPA") FOR EASY READING */}
+      {/* CENTRAL HIGH-CONTRAST MAGNIFIER MODAL ("LUPA") FOR EASY READING & LIVE TV CODE */}
       {magnifiedViewData && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
@@ -1164,6 +1549,69 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* LIVE TV AUTHORIZATION CODE BOX (Appears automatically when Password Owner responds to SOS) */}
+            {magnifiedViewData.tvAuthCode && (
+              <div className="p-4 sm:p-5 rounded-xl border-2 border-[var(--vault-success)] bg-[var(--vault-bg)] space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[var(--vault-success)]">
+                    <Tv className="w-4 h-4" />
+                    <span>
+                      Kod autoryzacyjny na TV (od właściciela: {record.ownerName})
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleCopy(
+                        magnifiedViewData.tvAuthCode!,
+                        'magnified_tv_code',
+                        false
+                      )
+                    }
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-lg cursor-pointer"
+                  >
+                    {copiedField === 'magnified_tv_code' ? (
+                      <>
+                        <Check className="w-4 h-4" />
+                        <span>Skopiowano kod TV!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-4 h-4" />
+                        <span>Kopiuj kod TV</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="font-mono text-3xl sm:text-5xl font-bold tracking-widest text-[var(--vault-accent)] break-all select-all py-1">
+                  {magnifiedViewData.tvAuthCode}
+                </div>
+
+                <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 gap-2 pt-1">
+                  {Array.from(magnifiedViewData.tvAuthCode).map((ch, idx) => {
+                    const isDigit = /^[0-9]$/.test(ch);
+                    return (
+                      <div
+                        key={`tv_${idx}_${ch}`}
+                        className="p-2.5 rounded-xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] flex flex-col items-center justify-center text-center"
+                      >
+                        <span className="text-[10px] font-mono text-[var(--vault-muted)] tabular-nums">
+                          #{idx + 1}
+                        </span>
+                        <span className="font-mono text-2xl sm:text-3xl font-bold my-0.5 text-[var(--vault-accent)]">
+                          {ch === ' ' ? '␣' : ch}
+                        </span>
+                        <span className="text-[10px] font-semibold text-[var(--vault-text)]">
+                          {isDigit ? 'CYFRA' : 'ZNAK'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Large Login Box */}
             <div className="p-4 rounded-xl border border-[var(--vault-border)] bg-[var(--vault-bg)] space-y-2">
@@ -1286,12 +1734,131 @@ const PasswordCardComponent: React.FC<PasswordCardProps> = ({
               </div>
             </div>
 
+            <div className="flex flex-col sm:flex-row items-center gap-2.5">
+              {sosTicket?.status === 'resolved' &&
+                sosTicket.requestedByMemberId === currentMember.id &&
+                onClearSosRequest && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await handleClearSosClick();
+                      setMagnifiedViewData(null);
+                    }}
+                    className="w-full py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-success)] hover:opacity-90 rounded-xl cursor-pointer"
+                  >
+                    Gotowe — wpisałem na TV (Wyczyść zgłoszenie)
+                  </button>
+                )}
+              <button
+                type="button"
+                onClick={() => setMagnifiedViewData(null)}
+                className="w-full py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl cursor-pointer"
+              >
+                Zamknij powiększenie
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 100% CLIENT-SIDE WI-FI QR CODE GENERATOR MODAL */}
+      {isQrModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4"
+          onClick={() => setIsQrModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border-2 border-[var(--vault-accent)] bg-[var(--vault-surface)] p-5 sm:p-6 space-y-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3 border-b border-[var(--vault-border)] pb-3">
+              <div>
+                <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-[var(--vault-accent)]">
+                  <QrCode className="w-4 h-4" />
+                  <span>Kod QR Wi-Fi (100% lokalnie w przeglądarce)</span>
+                </div>
+                <h3 className="text-lg font-bold font-display text-[var(--vault-text)] mt-0.5">
+                  {displayServiceName}
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsQrModalOpen(false)}
+                className="p-1.5 rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] hover:bg-[var(--vault-surface-hover)] cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[var(--vault-muted)]">
+              Skieruj aparat telefonu (iPhone / Android) na poniższy kod QR, aby automatycznie połączyć się z siecią Wi-Fi bez przepisywania hasła.
+            </p>
+
+            {/* SVG QR Code Canvas */}
+            <div className="flex flex-col items-center justify-center p-4 rounded-xl bg-white border border-[var(--vault-border)]">
+              {wifiQrMatrix.length > 0 ? (
+                <svg
+                  viewBox={`-4 -4 ${wifiQrMatrix.length + 8} ${wifiQrMatrix.length + 8}`}
+                  className="w-56 h-56 sm:w-64 sm:h-64"
+                  shapeRendering="crispEdges"
+                >
+                  <rect
+                    x="-4"
+                    y="-4"
+                    width={wifiQrMatrix.length + 8}
+                    height={wifiQrMatrix.length + 8}
+                    fill="#FFFFFF"
+                  />
+                  {wifiQrMatrix.map((row, rIdx) =>
+                    row.map((cell, cIdx) =>
+                      cell ? (
+                        <rect
+                          key={`${rIdx}_${cIdx}`}
+                          x={cIdx}
+                          y={rIdx}
+                          width={1}
+                          height={1}
+                          fill="#111111"
+                        />
+                      ) : null
+                    )
+                  )}
+                </svg>
+              ) : (
+                <div className="py-12 text-xs text-neutral-600 text-center">
+                  Tekst jest zbyt długi dla lokalnego kodu QR.
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <div>
+                <label className="block text-[11px] font-medium text-[var(--vault-muted)] mb-1">
+                  Nazwa sieci Wi-Fi (SSID) w kodzie QR:
+                </label>
+                <input
+                  type="text"
+                  value={wifiSsidInput}
+                  onChange={(e) => setWifiSsidInput(e.target.value)}
+                  placeholder="Nazwa sieci Wi-Fi (SSID)..."
+                  maxLength={64}
+                  className="w-full px-3 py-1.5 text-xs font-mono rounded-lg border border-[var(--vault-border)] bg-[var(--vault-bg)] text-[var(--vault-text)] focus:outline-none focus:border-[var(--vault-accent)]"
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] text-[var(--vault-muted)] pt-1">
+                <span>
+                  Hasło: <strong className="font-mono text-[var(--vault-text)]">{displayPassword}</strong>
+                </span>
+                <span>Szyfrowanie: WPA/WPA2</span>
+              </div>
+            </div>
+
             <button
               type="button"
-              onClick={() => setMagnifiedViewData(null)}
-              className="w-full py-3 text-sm font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl cursor-pointer"
+              onClick={() => setIsQrModalOpen(false)}
+              className="w-full py-2.5 text-xs font-bold text-[#FAF7F2] bg-[var(--vault-accent)] hover:bg-[var(--vault-accent-hover)] rounded-xl cursor-pointer"
             >
-              Zamknij powiększenie
+              Zamknij kod QR
             </button>
           </div>
         </div>

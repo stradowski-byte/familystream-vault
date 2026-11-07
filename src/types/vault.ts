@@ -214,14 +214,81 @@ export interface PasswordRecord {
   passwordUpdatedAt: string;
 }
 
-export function parseSubAccounts(record: PasswordRecord): SubAccountEntry[] {
-  if (!record.subAccountsJson) return [];
+export type PasswordSosReason = 'tv_code' | 'password_not_working';
+
+export interface PasswordSosTicket {
+  id: string;
+  requestedByMemberId: string;
+  requestedByMemberName: string;
+  targetOwnerId: string;
+  targetOwnerName: string;
+  reason: PasswordSosReason;
+  status: 'pending' | 'resolved';
+  responseCode?: string;
+  resolvedByName?: string;
+  createdAt: string;
+  resolvedAt?: string;
+}
+
+export interface PasswordCardExtras {
+  subAccounts: SubAccountEntry[];
+  sosTicket: PasswordSosTicket | null;
+  favoriteMemberIds: string[];
+}
+
+export function parsePasswordCardExtras(
+  record: PasswordRecord
+): PasswordCardExtras {
+  if (!record.subAccountsJson) {
+    return { subAccounts: [], sosTicket: null, favoriteMemberIds: [] };
+  }
   try {
     const parsed = JSON.parse(record.subAccountsJson);
-    return Array.isArray(parsed) ? (parsed as SubAccountEntry[]) : [];
+    if (Array.isArray(parsed)) {
+      return {
+        subAccounts: parsed as SubAccountEntry[],
+        sosTicket: null,
+        favoriteMemberIds: [],
+      };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Partial<PasswordCardExtras>;
+      return {
+        subAccounts: Array.isArray(obj.subAccounts) ? obj.subAccounts : [],
+        sosTicket:
+          obj.sosTicket && typeof obj.sosTicket === 'object'
+            ? (obj.sosTicket as PasswordSosTicket)
+            : null,
+        favoriteMemberIds: Array.isArray(obj.favoriteMemberIds)
+          ? obj.favoriteMemberIds.filter((id): id is string => typeof id === 'string')
+          : [],
+      };
+    }
+    return { subAccounts: [], sosTicket: null, favoriteMemberIds: [] };
   } catch {
-    return [];
+    return { subAccounts: [], sosTicket: null, favoriteMemberIds: [] };
   }
+}
+
+export function serializePasswordCardExtras(
+  extras: PasswordCardExtras
+): string {
+  const cleanFavs = Array.from(
+    new Set((extras.favoriteMemberIds || []).filter(Boolean))
+  );
+  // If there is no SOS ticket and no favorites, store as plain array for 100% backward compatibility
+  if (!extras.sosTicket && cleanFavs.length === 0) {
+    return JSON.stringify(extras.subAccounts || []);
+  }
+  return JSON.stringify({
+    subAccounts: extras.subAccounts || [],
+    sosTicket: extras.sosTicket || null,
+    favoriteMemberIds: cleanFavs,
+  });
+}
+
+export function parseSubAccounts(record: PasswordRecord): SubAccountEntry[] {
+  return parsePasswordCardExtras(record).subAccounts;
 }
 
 export interface DecryptedPrivatePayload {
@@ -260,6 +327,8 @@ export const DEFAULT_CATEGORIES: VaultCategory[] = [
   { id: 'shop', name: 'Sklep / Zakupy', order: 3 },
   { id: 'services', name: 'Usługi / Rachunki', order: 4 },
   { id: 'gaming', name: 'Gaming / Rozrywka', order: 5 },
-  { id: 'other', name: 'Inne', order: 6 },
+  { id: 'wifi', name: 'Wi-Fi / Sieć Domowa', order: 6 },
+  { id: 'other', name: 'Inne', order: 7 },
 ];
+
 
