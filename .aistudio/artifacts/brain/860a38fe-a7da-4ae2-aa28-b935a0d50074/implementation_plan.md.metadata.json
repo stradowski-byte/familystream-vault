@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan aktualizacji zakładki „Kopie i Konfiguracja” (AdminTab3ConfigAndBackup.tsx) o komplet aktualnych linków do repozytorium stradowski-byte/familystream-vault, przełączenia widoczności z Private na Public (Danger Zone), statusu GitHub Actions, adresu produkcyjnego GitHub Pages oraz bezpośrednich sekcji Firebase Console.",
-  "updatedAt":  "2026-11-07T19:46:55.113306059Z",
+  "summary":  "Zaktualizowany plan po upublicznieniu repozytorium stradowski-byte/familystream-vault: eliminacja błędu w Kroku 5 (Install dependencies) poprzez automatyczny pre-build czystej paczki produkcyjnej PWA (docs/) w AI Studio oraz publikację na gh-pages w 8 sekund bez wywoływania npm install na serwerze GitHuba.",
+  "updatedAt":  "2026-11-07T20:06:13.566235489Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
