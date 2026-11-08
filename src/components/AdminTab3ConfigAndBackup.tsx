@@ -18,6 +18,7 @@ import {
   VaultConfig,
 } from '../types/vault';
 import {
+  estimateFirestoreProjectStorage,
   exportActiveFirebaseConfigJson,
   getFirebaseProjectInfo,
 } from '../lib/firebase';
@@ -42,6 +43,7 @@ interface AdminTab3ConfigAndBackupProps {
     initializedCollections: string[];
     skippedExistingCollections: string[];
   }>;
+  storageCollectionsData?: unknown[];
 }
 
 export const AdminTab3ConfigAndBackup: React.FC<
@@ -55,6 +57,7 @@ export const AdminTab3ConfigAndBackup: React.FC<
   onDownloadLocalBackupFile,
   onRestoreBackupFromFile,
   onEnsureBaseCollections,
+  storageCollectionsData = [],
 }) => {
   // Categories state
   const [newCategoryName, setNewCategoryName] = useState('');
@@ -91,6 +94,7 @@ export const AdminTab3ConfigAndBackup: React.FC<
   const currentHostname =
     typeof window !== 'undefined' ? window.location.hostname : '';
   const fbInfo = getFirebaseProjectInfo();
+  const storageQuota = estimateFirestoreProjectStorage(storageCollectionsData);
 
   const [pendingRestorePayload, setPendingRestorePayload] = useState<{
     sourceLabel: string;
@@ -297,6 +301,40 @@ export const AdminTab3ConfigAndBackup: React.FC<
               <CheckCircle2 className="w-3.5 h-3.5" />
               <span>Synchronizacja onSnapshot Aktywna</span>
             </span>
+          </div>
+
+          {/* Prosty pasek ogólnej zajętości pojemności projektu Firebase (Limit 1 GiB per projekt) */}
+          <div className="pt-3 border-t border-[var(--vault-border)] space-y-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <span className="font-semibold text-[var(--vault-text)]">
+                Zajętość pojemności Storage projektu Firebase (limit 1 GiB per projekt):
+              </span>
+              <span className="font-mono text-[var(--vault-text)] tabular-nums">
+                <strong>{storageQuota.usedFormatted}</strong> / 1.00 GiB (
+                {storageQuota.percentUsed > 0 && storageQuota.percentUsed < 0.01
+                  ? '< 0.01%'
+                  : `${storageQuota.percentUsed.toFixed(2)}%`}
+                ) · Wolne: {storageQuota.freeFormatted}
+              </span>
+            </div>
+            <div className="w-full h-2 rounded-full bg-[var(--vault-surface)] border border-[var(--vault-border)] overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 ${
+                  storageQuota.percentUsed > 85
+                    ? 'bg-[var(--vault-danger)]'
+                    : storageQuota.percentUsed > 65
+                      ? 'bg-[var(--vault-warning)]'
+                      : 'bg-[var(--vault-success)]'
+                }`}
+                style={{
+                  width: `${
+                    storageQuota.usedBytes > 0
+                      ? Math.max(1.5, Math.min(100, storageQuota.percentUsed))
+                      : 0
+                  }%`,
+                }}
+              />
+            </div>
           </div>
 
           {onEnsureBaseCollections && (

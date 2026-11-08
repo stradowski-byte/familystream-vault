@@ -54,14 +54,14 @@ CZĘŚĆ 2 — CAŁKOWITE USUNIĘCIE WBUDOWANEGO W APLIKACJĘ GITHUBA I PRZEJŚC
    - Utwórz skrypt `scripts/build-gh-pages.mjs` i podepnij go w `package.json` jako `"build": "node scripts/build-gh-pages.mjs"` (skrypt na czas `vite build` podmienia `firebase-applet-config.json` na `{}`, generuje `dist/404.html` oraz `dist/.nojekyll`, a w bloku `finally` przywraca lokalny `firebase-applet-config.json`).
    - Upewnij się, że w `vite.config.ts` ustawione jest `base: './'`, a w `index.html` ikony używają ścieżek względnych `./`.
    - Utwórz plik `.github/workflows/deploy.yml` używający `Node.js 24`, usuwający na czas CI konfliktowy pakiet `@firebase/eslint-plugin-security-rules`, instalujący zależności przez `npm install --legacy-peer-deps --no-audit --no-fund`, uruchamiający `npm run build` i publikujący katalog `./dist` na gałąź `gh-pages` (`peaceiris/actions-gh-pages@v4`).
-   - W zakładce „Kopie i Konfiguracja” dodaj sekcję aktualnych linków do repozytorium GitHub (w tym przycisk zmiany widoczności z Private na Public w Danger Zone, link do GitHub Actions, ustawień GitHub Pages oraz bezpośrednie skróty do konsoli Firebase).
+   - W zakładce „Kopie i Konfiguracja” dodaj prosty pasek ogólnej zajętości pojemności Storage projektu Firebase względem darmowego limitu `1 GiB per projekt` (`estimateFirestoreProjectStorage`) oraz sekcję aktualnych linków do repozytorium GitHub (w tym przycisk zmiany widoczności z Private na Public w Danger Zone, link do GitHub Actions, ustawień GitHub Pages oraz bezpośrednie skróty do konsoli Firebase).
 ```
 
 ---
 
 ### Wariant A (Budowa zupełnie nowej aplikacji od zera):
 ```markdown
-Zbuduj aplikację [WPISZ NAZWĘ I OPIS NOWEJ APLIKACJI] wykorzystując w 100% wzorzec architektoniczny Firebase Cloud Firestore (`onSnapshot`), autoryzacji wieloużytkownikowej, PWA oraz natywnego wdrożenia GitHub Pages (`.github/workflows/deploy.yml` + `scripts/build-gh-pages.mjs`) opisany w załączonym dokumencie `FIREBASE_BLUEPRINT_GUIDE.md`. Nie twórz w aplikacji żadnej własnej zakładki do commitów GitHub — aplikacja korzysta wyłącznie z natywnej integracji GitHub wbudowanej w Google AI Studio.
+Zbuduj aplikację [WPISZ NAZWĘ I OPIS NOWEJ APLIKACJI] wykorzystując w 100% wzorzec architektoniczny Firebase Cloud Firestore (`onSnapshot`), autoryzacji wieloużytkownikowej, prostego paska zajętości pojemności `1 GiB per projekt` (`estimateFirestoreProjectStorage`), PWA oraz natywnego wdrożenia GitHub Pages (`.github/workflows/deploy.yml` + `scripts/build-gh-pages.mjs`) opisany w załączonym dokumencie `FIREBASE_BLUEPRINT_GUIDE.md`. Nie twórz w aplikacji żadnej własnej zakładki do commitów GitHub — aplikacja korzysta wyłącznie z natywnej integracji GitHub wbudowanej w Google AI Studio.
 ```
 
 ---
@@ -849,6 +849,106 @@ export async function testFirestoreConnection(): Promise<void> {
     }
   }
 }
+
+export const FIRESTORE_SPARK_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024; // 1 GiB per projekt Firebase (plan darmowy Spark)
+
+function formatBytesHuman(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(2)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GiB`;
+}
+
+/**
+ * Oblicza szacowaną zajętość pojemności bazy Cloud Firestore dla bieżącego projektu
+ * względem darmowego limitu 1 GiB (1 024 MB) przysługującego osobno na każdy projekt Firebase.
+ */
+export function estimateFirestoreProjectStorage(
+  collectionsData: unknown[]
+): {
+  usedBytes: number;
+  limitBytes: number;
+  percentUsed: number;
+  usedFormatted: string;
+  freeFormatted: string;
+} {
+  let rawBytes = 0;
+  let docCount = 0;
+
+  for (const item of collectionsData) {
+    if (!item) continue;
+    if (Array.isArray(item)) {
+      docCount += item.length;
+      try {
+        rawBytes += new TextEncoder().encode(JSON.stringify(item)).length;
+      } catch {
+        // ignore
+      }
+    } else if (typeof item === 'object') {
+      docCount += 1;
+      try {
+        rawBytes += new TextEncoder().encode(JSON.stringify(item)).length;
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  const usedBytes = Math.round(rawBytes * 1.8 + docCount * 64);
+  const limitBytes = FIRESTORE_SPARK_STORAGE_LIMIT_BYTES;
+  const percentUsed = Math.min(100, (usedBytes / limitBytes) * 100);
+  const freeBytes = Math.max(0, limitBytes - usedBytes);
+
+  return {
+    usedBytes,
+    limitBytes,
+    percentUsed,
+    usedFormatted: formatBytesHuman(usedBytes),
+    freeFormatted: formatBytesHuman(freeBytes),
+  };
+}
+```
+
+### Gotowy snippet UI: Prosty Pasek Zajętości Pojemności Projektu Firebase (`1 GiB per projekt`)
+Wklej w zakładce konfiguracji Administratora (przekazując tablicę wszystkich załadowanych kolekcji, np. `const storageQuota = estimateFirestoreProjectStorage([vaultConfig, members, devices, mainRecords, invitations, activityLogs])`):
+
+```tsx
+<div className="pt-3 border-t border-[var(--vault-border)] space-y-1.5">
+  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+    <span className="font-semibold text-[var(--vault-text)]">
+      Zajętość pojemności Storage projektu Firebase (limit 1 GiB per projekt):
+    </span>
+    <span className="font-mono text-[var(--vault-text)] tabular-nums">
+      <strong>{storageQuota.usedFormatted}</strong> / 1.00 GiB (
+      {storageQuota.percentUsed > 0 && storageQuota.percentUsed < 0.01
+        ? '< 0.01%'
+        : `${storageQuota.percentUsed.toFixed(2)}%`}
+      ) · Wolne: {storageQuota.freeFormatted}
+    </span>
+  </div>
+  <div className="w-full h-2 rounded-full bg-[var(--vault-surface)] border border-[var(--vault-border)] overflow-hidden">
+    <div
+      className={`h-full transition-all duration-300 ${
+        storageQuota.percentUsed > 85
+          ? 'bg-[var(--vault-danger)]'
+          : storageQuota.percentUsed > 65
+            ? 'bg-[var(--vault-warning)]'
+            : 'bg-[var(--vault-success)]'
+      }`}
+      style={{
+        width: `${
+          storageQuota.usedBytes > 0
+            ? Math.max(1.5, Math.min(100, storageQuota.percentUsed))
+            : 0
+        }%`,
+      }}
+    />
+  </div>
+</div>
 ```
 
 ---

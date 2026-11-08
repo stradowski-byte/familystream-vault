@@ -406,6 +406,70 @@ export function getFirebaseProjectInfo(): {
   };
 }
 
+export const FIRESTORE_SPARK_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024; // 1 GiB per projekt Firebase (darmowy plan Spark)
+
+function formatBytesHuman(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb.toFixed(1)} KB`;
+  const mb = kb / 1024;
+  if (mb < 1024) return `${mb.toFixed(2)} MB`;
+  const gb = mb / 1024;
+  return `${gb.toFixed(2)} GiB`;
+}
+
+/**
+ * Oblicza szacowaną zajętość pojemności bazy Cloud Firestore dla bieżącego projektu
+ * względem darmowego limitu 1 GiB (1 024 MB) przysługującego osobno na każdy projekt Firebase.
+ * Uwzględnia rozmiar UTF-8 dokumentów oraz narzut metadanych i indeksów Firestore (~1.8x + 64B/dok).
+ */
+export function estimateFirestoreProjectStorage(
+  collectionsData: unknown[]
+): {
+  usedBytes: number;
+  limitBytes: number;
+  percentUsed: number;
+  usedFormatted: string;
+  freeFormatted: string;
+} {
+  let rawBytes = 0;
+  let docCount = 0;
+
+  for (const item of collectionsData) {
+    if (!item) continue;
+    if (Array.isArray(item)) {
+      docCount += item.length;
+      try {
+        rawBytes += new TextEncoder().encode(JSON.stringify(item)).length;
+      } catch {
+        // ignore serialization error
+      }
+    } else if (typeof item === 'object') {
+      docCount += 1;
+      try {
+        rawBytes += new TextEncoder().encode(JSON.stringify(item)).length;
+      } catch {
+        // ignore serialization error
+      }
+    }
+  }
+
+  // Firestore document & composite index storage overhead (~1.8x serialized JSON + 64B path/metadata per doc)
+  const usedBytes = Math.round(rawBytes * 1.8 + docCount * 64);
+  const limitBytes = FIRESTORE_SPARK_STORAGE_LIMIT_BYTES;
+  const percentUsed = Math.min(100, (usedBytes / limitBytes) * 100);
+  const freeBytes = Math.max(0, limitBytes - usedBytes);
+
+  return {
+    usedBytes,
+    limitBytes,
+    percentUsed,
+    usedFormatted: formatBytesHuman(usedBytes),
+    freeFormatted: formatBytesHuman(freeBytes),
+  };
+}
+
 export async function diagnoseFirebaseAuthConfiguration(): Promise<string> {
   const cfg = getActiveFirebaseConfig();
   if (!cfg) {

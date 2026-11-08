@@ -3498,6 +3498,14 @@ export default function App() {
                 onUpdateSystemSettings={handleUpdateSystemSettings}
                 onDownloadLocalBackupFile={handleDownloadLocalBackupFile}
                 onRestoreBackupFromFile={handleRestoreBackupFromFile}
+                storageCollectionsData={[
+                  vaultConfig,
+                  members,
+                  devices,
+                  passwords,
+                  invitations,
+                  activityLogs,
+                ]}
                 onEnsureBaseCollections={async () => {
                   const res = await ensureBaseCollectionsInitializedInFirestore({
                     adminUid:

@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan kompleksowej aktualizacji dokumentacji (FIREBASE_BLUEPRINT_GUIDE.md oraz README.md) o pełny przewodnik migracji z Google Drive na Firebase Cloud Firestore oraz przejścia z wbudowanej w aplikację obsługi GitHuba na natywną integrację GitHub w Google AI Studio + GitHub Actions (gh-pages).",
-  "updatedAt":  "2026-11-07T20:47:23.581228641Z",
+  "summary":  "Plan wdrożenia prostego paska ogólnej zajętości pojemności projektu Firebase (względem darmowego limitu 1 GiB per projekt) w zakładce Kopie i Konfiguracja oraz dopisania gotowego wzorca do FIREBASE_BLUEPRINT_GUIDE.md dla drugiego projektu.",
+  "updatedAt":  "2026-11-08T22:56:16.312165955Z",
   "requestFeedback":  true,
   "userFacing":  true
 }
